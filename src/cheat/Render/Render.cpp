@@ -1,9 +1,12 @@
 #include "Render/Render.hpp"
 
+#include <windowsx.h>
+
 #include "Config.hpp"
 #include "Features/Aimbot.hpp"
 #include "Features/BulletTP.hpp"
 #include "Features/ESP.hpp"
+#include "Input/Pad.hpp"
 #include "Logger.hpp"
 #include "Menu/Menu.hpp"
 #include "SDK/SDK.hpp"
@@ -38,7 +41,7 @@ ID3D11RenderTargetView* g_target = nullptr;
 
 bool g_imguiReady = false;
 bool g_installed = false;
-bool g_menuOpen = true;
+bool g_previousMenuKeyDown = false;
 
 void release_target() {
     if (g_target) {
@@ -61,16 +64,22 @@ void create_target(IDXGISwapChain* swapchain) {
 }
 
 LRESULT CALLBACK wndproc(HWND window, UINT message, WPARAM wparam, LPARAM lparam) {
-    if (message == WM_KEYDOWN && static_cast<int>(wparam) == config::g.menu_key) {
-        toggle_menu();
+    // Anti-repetition : WM_KEYDOWN se declenche en rafale tant que la touche est tenue.
+    if (message == WM_KEYDOWN || message == WM_KEYUP) {
+        const bool down = (message == WM_KEYDOWN);
+        if (static_cast<int>(wparam) == config::g.menu_key) {
+            if (down && !g_previousMenuKeyDown) {
+                toggle_menu();
+            }
+            g_previousMenuKeyDown = down;
+        }
     }
 
     if (menu_open()) {
-        if (ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam)) {
-            return TRUE;
-        }
+        ImGui_ImplWin32_WndProcHandler(window, message, wparam, lparam);
+
+        // On n'avale que la souris : le clavier continue d'aller au jeu.
         switch (message) {
-            case WM_MOUSEMOVE:
             case WM_LBUTTONDOWN:
             case WM_LBUTTONUP:
             case WM_RBUTTONDOWN:
@@ -80,11 +89,12 @@ LRESULT CALLBACK wndproc(HWND window, UINT message, WPARAM wparam, LPARAM lparam
             case WM_MOUSEWHEEL:
             case WM_XBUTTONDOWN:
             case WM_XBUTTONUP:
-            case WM_KEYDOWN:
-            case WM_KEYUP:
-            case WM_CHAR:
-            case WM_SETCURSOR:
                 return TRUE;
+            case WM_MOUSEMOVE:
+                if (ImGui::GetIO().WantCaptureMouse) {
+                    return TRUE;
+                }
+                break;
             default:
                 break;
         }
@@ -115,18 +125,10 @@ bool init_imgui(IDXGISwapChain* swapchain) {
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
-    ImGui::StyleColorsDark();
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 4.0f;
-    style.FrameRounding = 3.0f;
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.06f, 0.06f, 0.08f, 0.94f);
-    style.Colors[ImGuiCol_TitleBg] = ImVec4(0.10f, 0.06f, 0.16f, 1.00f);
-    style.Colors[ImGuiCol_TitleBgActive] = ImVec4(0.16f, 0.09f, 0.26f, 1.00f);
-    style.Colors[ImGuiCol_CheckMark] = ImVec4(0.72f, 0.42f, 1.00f, 1.00f);
-    style.Colors[ImGuiCol_SliderGrab] = ImVec4(0.72f, 0.42f, 1.00f, 1.00f);
-    style.Colors[ImGuiCol_Button] = ImVec4(0.22f, 0.12f, 0.36f, 1.00f);
-    style.Colors[ImGuiCol_ButtonHovered] = ImVec4(0.32f, 0.18f, 0.50f, 1.00f);
+    menu::apply_style();
+    menu::load_fonts();
 
     ImGui_ImplWin32_Init(g_window);
     ImGui_ImplDX11_Init(g_device, g_context);
@@ -145,6 +147,12 @@ HRESULT WINAPI present_hook(IDXGISwapChain* swapchain, UINT sync, UINT flags) {
     }
 
     if (g_imguiReady && g_context && g_target) {
+        // Manette : XInput ne genere aucun WM_KEYDOWN, tout passe par la frame.
+        pad::update();
+        if (config::g.pad_enabled && pad::pressed_combo(config::g.menu_pad_combo)) {
+            toggle_menu();
+        }
+
         sdk::update();
         features::esp::tick();
         features::aimbot::tick();
@@ -152,6 +160,10 @@ HRESULT WINAPI present_hook(IDXGISwapChain* swapchain, UINT sync, UINT flags) {
 
         ImGui_ImplDX11_NewFrame();
         ImGui_ImplWin32_NewFrame();
+        pad::feed_imgui();
+
+        ImGui::GetIO().MouseDrawCursor = config::g.menu_open;
+
         ImGui::NewFrame();
 
         menu::draw();
@@ -266,6 +278,8 @@ void uninstall() {
         return;
     }
 
+    pad::shutdown();
+
     if (g_presentSlot && g_present) {
         DWORD protection = 0;
         if (VirtualProtect(g_presentSlot, sizeof(void*), PAGE_EXECUTE_READWRITE, &protection)) {
@@ -303,11 +317,12 @@ bool installed() {
 }
 
 bool menu_open() {
-    return g_menuOpen;
+    return config::g.menu_open;
 }
 
 void toggle_menu() {
-    g_menuOpen = !g_menuOpen;
+    config::g.menu_open = !config::g.menu_open;
+    config::save();
 }
 
 } // namespace render

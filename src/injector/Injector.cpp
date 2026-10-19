@@ -1,13 +1,16 @@
 #include "Injector.hpp"
 
 #include "Elevation.hpp"
+#include "Paths.hpp"
 
 #include <tlhelp32.h>
 
 #include <algorithm>
 #include <chrono>
 #include <cwctype>
+#include <string>
 #include <thread>
+#include <vector>
 
 namespace injector {
 
@@ -83,6 +86,58 @@ HANDLE open_target(DWORD pid, DWORD& lastError) {
     }
 }
 
+std::wstring process_directory(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return {};
+    }
+
+    wchar_t buffer[MAX_PATH * 2]{};
+    DWORD size = static_cast<DWORD>(std::size(buffer));
+    std::wstring full;
+    if (QueryFullProcessImageNameW(process, 0, buffer, &size)) {
+        full.assign(buffer, size);
+    }
+    CloseHandle(process);
+
+    const size_t slash = full.find_last_of(L"\\/");
+    return slash == std::wstring::npos ? std::wstring() : full.substr(0, slash);
+}
+
+// Lance une fonction kernel32 a un argument wchar_t* dans le process cible.
+bool run_remote(HANDLE process, const char* function, const std::wstring& argument) {
+    const SIZE_T size = (argument.size() + 1) * sizeof(wchar_t);
+
+    void* remote = VirtualAllocEx(process, nullptr, size, MEM_COMMIT | MEM_RESERVE,
+                                  PAGE_READWRITE);
+    if (!remote) {
+        return false;
+    }
+
+    if (!WriteProcessMemory(process, remote, argument.c_str(), size, nullptr)) {
+        VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+        return false;
+    }
+
+    auto routine = reinterpret_cast<LPTHREAD_START_ROUTINE>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), function));
+    if (!routine) {
+        VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+        return false;
+    }
+
+    HANDLE thread = CreateRemoteThread(process, nullptr, 0, routine, remote, 0, nullptr);
+    if (!thread) {
+        VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+        return false;
+    }
+
+    const DWORD wait = WaitForSingleObject(thread, 10000);
+    CloseHandle(thread);
+    VirtualFreeEx(process, remote, 0, MEM_RELEASE);
+    return wait == WAIT_OBJECT_0;
+}
+
 } // namespace
 
 std::vector<Target> find_fortnite_processes() {
@@ -137,6 +192,12 @@ bool wait_for_fortnite(DWORD timeoutMs, std::vector<Target>& out) {
     }
 }
 
+// Le splash EAC expose le process avant la vraie fenetre de jeu : injecter trop
+// tot fait echouer LoadLibraryW. On attend UnrealWindow.
+bool game_window_ready() {
+    return FindWindowW(L"UnrealWindow", nullptr) != nullptr;
+}
+
 bool is_process_alive(DWORD pid) {
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
     if (!process) {
@@ -166,15 +227,34 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
         return false;
     }
 
-    const SIZE_T size = (dllPath.size() + 1) * sizeof(wchar_t);
-    void* remote = VirtualAllocEx(process, nullptr, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    // On copie la DLL DANS le dossier du jeu : ses dependances (vcruntime, msvcp,
+    // d3d, dxgi...) se resolvent alors exactement comme pour le jeu lui-meme.
+    std::wstring directory = process_directory(pid);
+    std::wstring target = dllPath;
+
+    if (!directory.empty()) {
+        const std::wstring copy = directory + L"\\RetracOGFN_inj.dll";
+        if (CopyFileW(dllPath.c_str(), copy.c_str(), FALSE)) {
+            target = copy;
+        }
+    }
+
+    // Force le dossier de la DLL comme repertoire de recherche dans la cible.
+    const size_t slash = target.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) {
+        run_remote(process, "SetDllDirectoryW", target.substr(0, slash));
+    }
+
+    const SIZE_T size = (target.size() + 1) * sizeof(wchar_t);
+    void* remote = VirtualAllocEx(process, nullptr, size, MEM_COMMIT | MEM_RESERVE,
+                                  PAGE_READWRITE);
     if (!remote) {
         error = "VirtualAllocEx a echoue (code " + std::to_string(GetLastError()) + ")";
         CloseHandle(process);
         return false;
     }
 
-    if (!WriteProcessMemory(process, remote, dllPath.c_str(), size, nullptr)) {
+    if (!WriteProcessMemory(process, remote, target.c_str(), size, nullptr)) {
         error = "WriteProcessMemory a echoue (code " + std::to_string(GetLastError()) + ")";
         VirtualFreeEx(process, remote, 0, MEM_RELEASE);
         CloseHandle(process);
@@ -202,7 +282,9 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
     const DWORD wait = WaitForSingleObject(thread, 30000);
 
     DWORD exitCode = 0;
-    GetExitCodeThread(thread, &exitCode);
+    if (!GetExitCodeThread(thread, &exitCode)) {
+        exitCode = 0;
+    }
 
     CloseHandle(thread);
     VirtualFreeEx(process, remote, 0, MEM_RELEASE);
@@ -213,7 +295,8 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
         return false;
     }
     if (exitCode == 0) {
-        error = "LoadLibraryW a renvoye NULL dans le process cible";
+        error = "LoadLibraryW a renvoye NULL : dependance manquante dans " +
+                paths::to_narrow(directory.empty() ? target : directory);
         return false;
     }
 

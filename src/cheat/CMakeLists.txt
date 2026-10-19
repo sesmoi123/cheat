@@ -2,6 +2,8 @@ set(CHEAT_SOURCES
     dllmain.cpp
     Core.hpp Core.cpp
     Config.hpp Config.cpp
+    Input/Pad.hpp Input/Pad.cpp
+    Input/Input.hpp Input/Input.cpp
     SDK/Offsets.hpp SDK/Offsets.cpp
     SDK/Math.hpp
     SDK/SDK.hpp SDK/SDK.cpp
@@ -27,6 +29,7 @@ target_include_directories(RetracCheat PRIVATE
     "${IMGUI_DIR}"
     "${IMGUI_DIR}/backends")
 
-target_link_libraries(RetracCheat PRIVATE common d3d11 dxgi dxguid)
+# xinput : lecture manette. Laisser IMGUI_IMPL_WIN32_DISABLE_GAMEPAD non defini.
+target_link_libraries(RetracCheat PRIVATE common d3d11 dxgi dxguid xinput)
 
 set_target_properties(RetracCheat PROPERTIES PREFIX "" OUTPUT_NAME "RetracCheat")

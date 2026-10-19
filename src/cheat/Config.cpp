@@ -21,6 +21,12 @@ void load() {
     g.menu_key = static_cast<int>(root.number("menu_key", g.menu_key));
     g.watermark = root.boolean("watermark", g.watermark);
 
+    g.pad_enabled = root.boolean("pad_enabled", g.pad_enabled);
+    g.menu_pad_combo = static_cast<uint32_t>(root.number("menu_pad_combo", g.menu_pad_combo));
+    g.aim_pad_button = static_cast<uint32_t>(root.number("aim_pad_button", g.aim_pad_button));
+    g.bullet_pad_button =
+        static_cast<uint32_t>(root.number("bullet_pad_button", g.bullet_pad_button));
+
     g.esp_enabled = root.boolean("esp_enabled", g.esp_enabled);
     g.esp_box = root.boolean("esp_box", g.esp_box);
     g.esp_skeleton = root.boolean("esp_skeleton", g.esp_skeleton);
@@ -51,6 +57,11 @@ void save() {
 
     root.set_number("menu_key", g.menu_key);
     root.set_boolean("watermark", g.watermark);
+
+    root.set_boolean("pad_enabled", g.pad_enabled);
+    root.set_number("menu_pad_combo", g.menu_pad_combo);
+    root.set_number("aim_pad_button", g.aim_pad_button);
+    root.set_number("bullet_pad_button", g.bullet_pad_button);
 
     root.set_boolean("esp_enabled", g.esp_enabled);
     root.set_boolean("esp_box", g.esp_box);
