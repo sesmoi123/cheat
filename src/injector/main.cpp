@@ -16,15 +16,11 @@ namespace {
 
 constexpr wchar_t kDllName[] = L"RetracOGFN.dll";
 
-// Remplace dpiAware / dpiAwareness du manifest : per-monitor v2 si dispo,
-// sinon repli sur l'awareness systeme. A appeler avant toute fenetre/console.
 void enable_dpi_awareness() {
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
         using SetContextFn = BOOL(WINAPI*)(HANDLE);
         auto setContext =
             reinterpret_cast<SetContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
-
-        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 vaut -4.
         const HANDLE perMonitorV2 = reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4));
         if (setContext && setContext(perMonitorV2)) {
             return;
@@ -65,7 +61,7 @@ void banner() {
     std::cout << "  \x1b[95m| |_) / _ \\ __| '__/ _` | / __|\x1b[0m\n";
     std::cout << "  \x1b[95m|  _ <  __/ |_| | | (_| | \\__ \\\x1b[0m\n";
     std::cout << "  \x1b[95m|_| \\_\\___|\\__|_|  \\__,_|_|___/\x1b[0m\n";
-    std::cout << "\n  \x1b[90mESP  |  Aimbot  |  Bullet TP\x1b[0m\n\n";
+    std::cout << "\n  \x1b[90mESP  |  Aimbot  |  Bullet TP  |  Manette\x1b[0m\n\n";
 }
 
 void log_line(const char* tag, const char* color, const std::string& text) {
@@ -165,6 +161,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
     }
 
+    // Le process apparait au splash EAC, bien avant la fenetre de jeu.
+    log_line("info", "96", "Attente de la fenetre de jeu (splash EAC en cours)...");
+    for (int second = 0; second < 180 && !injector::game_window_ready(); ++second) {
+        Sleep(1000);
+    }
+    if (!injector::game_window_ready()) {
+        log_line("avert", "93", "Fenetre de jeu absente : on injecte quand meme.");
+    } else {
+        log_line("ok", "92", "Fenetre de jeu detectee.");
+    }
+
     bool injected = false;
     for (int attempt = 1; attempt <= 5 && !injected; ++attempt) {
         if (targets.empty()) {
@@ -182,7 +189,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
             if (injector::inject_library(target.pid, dllPath, error)) {
                 injected = true;
                 log_line("ok", "92", "Injection reussie !");
-                log_line("info", "96", "Appuie sur Inser en jeu pour ouvrir le menu.");
+                log_line("info", "96", "Inser ou LB+RB en jeu pour ouvrir le menu.");
                 break;
             }
 

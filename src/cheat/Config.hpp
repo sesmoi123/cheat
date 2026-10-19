@@ -2,6 +2,7 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <string>
 
 namespace config {
@@ -11,6 +12,11 @@ struct Settings {
     int menu_key = VK_INSERT;
 
     bool watermark = true;
+
+    bool pad_enabled = true;
+    uint32_t menu_pad_combo = 0x0300;    // LB | RB
+    uint32_t aim_pad_button = 0x10000;   // LT
+    uint32_t bullet_pad_button = 0x8000; // Y
 
     bool esp_enabled = true;
     bool esp_box = true;
