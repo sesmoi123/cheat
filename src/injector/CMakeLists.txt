@@ -12,6 +12,9 @@ file(GENERATE
 
 set_source_files_properties("${RETRAC_RESOURCE_RC}" PROPERTIES GENERATED TRUE)
 
+# Pas de fichier .manifest dans les sources : sur certaines versions du
+# generateur VS il finit sur la ligne de link et provoque
+# LNK1181 ... RetracOGFN.manifest.obj.
 add_executable(RetracOGFN-Launcher WIN32
     main.cpp
     Elevation.hpp
@@ -23,16 +26,17 @@ add_executable(RetracOGFN-Launcher WIN32
     "${RETRAC_RESOURCE_RC}")
 
 # advapi32 : OpenProcessToken / AdjustTokenPrivileges / LookupPrivilegeValue.
-target_link_libraries(RetracOGFN-Launcher PRIVATE common shell32 advapi32)
+# user32   : SetProcessDpiAwarenessContext / SetProcessDPIAware.
+target_link_libraries(RetracOGFN-Launcher PRIVATE common shell32 advapi32 user32)
+
+# Elevation administrateur demandee via le linker : le manifest est genere
+# automatiquement, aucun fichier annexe a maintenir.
+target_link_options(RetracOGFN-Launcher PRIVATE
+    "/MANIFESTUAC:level='requireAdministrator'")
 
 add_dependencies(RetracOGFN-Launcher RetracCheat)
 
 set_property(SOURCE "${RETRAC_RESOURCE_RC}" APPEND PROPERTY OBJECT_DEPENDS "$<TARGET_FILE:RetracCheat>")
-
-# Manifest maison : elevation administrateur obligatoire.
-target_link_options(RetracOGFN-Launcher PRIVATE
-    "/MANIFESTUAC:NO"
-    "/MANIFESTINPUT:\"${CMAKE_CURRENT_SOURCE_DIR}/RetracOGFN.manifest\"")
 
 set_target_properties(RetracOGFN-Launcher PROPERTIES OUTPUT_NAME "RetracOGFN")
 

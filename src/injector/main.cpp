@@ -1,5 +1,4 @@
 #include <windows.h>
-#include <shellapi.h>
 
 #include <cstdio>
 #include <cwchar>
@@ -16,6 +15,23 @@
 namespace {
 
 constexpr wchar_t kDllName[] = L"RetracOGFN.dll";
+
+// Remplace dpiAware / dpiAwareness du manifest : per-monitor v2 si dispo,
+// sinon repli sur l'awareness systeme. A appeler avant toute fenetre/console.
+void enable_dpi_awareness() {
+    if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
+        using SetContextFn = BOOL(WINAPI*)(HANDLE);
+        auto setContext =
+            reinterpret_cast<SetContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+
+        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 vaut -4.
+        const HANDLE perMonitorV2 = reinterpret_cast<HANDLE>(static_cast<INT_PTR>(-4));
+        if (setContext && setContext(perMonitorV2)) {
+            return;
+        }
+    }
+    SetProcessDPIAware();
+}
 
 void attach_console() {
     if (!AllocConsole()) {
@@ -112,6 +128,7 @@ bool auto_elevate() {
 } // namespace
 
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
+    enable_dpi_awareness();
     attach_console();
     enable_colors();
     banner();
