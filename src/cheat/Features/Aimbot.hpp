@@ -1,14 +1,7 @@
 #pragma once
 
-#include <vector>
+namespace features::aimbot {
 
-#include "SDK/UE.hpp"
+void tick();
 
-namespace aimbot {
-
-void update(const sdk::Camera& camera, const std::vector<sdk::Player>& players);
-void draw_fov(const sdk::Camera& camera);
-bool has_target();
-const sdk::Player& target();
-
-} // namespace aimbot
+} // namespace features::aimbot

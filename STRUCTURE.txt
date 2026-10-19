@@ -1,0 +1,7 @@
+CMakeLists.txt              start.bat
+.github/workflows/build.yml tools/deploy.mjs
+README.md
+
+src/common/    Logger, Memory, Scanner, Json, Paths
+src/injector/  launcher : manifest, elevation, injection, ressource DLL
+src/cheat/     la DLL : SDK, Render, Features, Menu

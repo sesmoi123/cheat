@@ -1,164 +1,124 @@
 #include "Features/ESP.hpp"
 
-#include <algorithm>
-#include <cmath>
-#include <cstdio>
+#include "Config.hpp"
+#include "Render/Draw.hpp"
+#include "SDK/SDK.hpp"
 
 #include <imgui.h>
 
-#include "Config.hpp"
-#include "Render/Draw.hpp"
+#include <cstdio>
 
-namespace esp {
+namespace features::esp {
 
 namespace {
 
-constexpr int kSkeletonSegments[][2] = {
-    {sdk::bones::Head, sdk::bones::Neck},
-    {sdk::bones::Neck, sdk::bones::Chest},
-    {sdk::bones::Chest, sdk::bones::Pelvis},
-
-    {sdk::bones::Neck, sdk::bones::LeftShoulder},
-    {sdk::bones::LeftShoulder, sdk::bones::LeftElbow},
-    {sdk::bones::LeftElbow, sdk::bones::LeftHand},
-
-    {sdk::bones::Neck, sdk::bones::RightShoulder},
-    {sdk::bones::RightShoulder, sdk::bones::RightElbow},
-    {sdk::bones::RightElbow, sdk::bones::RightHand},
-
-    {sdk::bones::Pelvis, sdk::bones::LeftThigh},
-    {sdk::bones::LeftThigh, sdk::bones::LeftKnee},
-    {sdk::bones::LeftKnee, sdk::bones::LeftFoot},
-
-    {sdk::bones::Pelvis, sdk::bones::RightThigh},
-    {sdk::bones::RightThigh, sdk::bones::RightKnee},
-    {sdk::bones::RightKnee, sdk::bones::RightFoot},
+// Chaine approximative du squelette humain Fortnite (indices de bones).
+struct BoneLink {
+    int from;
+    int to;
 };
 
-void draw_skeleton(ImDrawList* list, const sdk::Player& player, const sdk::Camera& camera,
-                   double screenWidth, double screenHeight, ImU32 color, float thickness) {
-    for (const auto& segment : kSkeletonSegments) {
-        const sdk::FVector from = sdk::get_bone(player.mesh, segment[0]);
-        const sdk::FVector to = sdk::get_bone(player.mesh, segment[1]);
-        if (from.empty() || to.empty()) {
-            continue;
-        }
-
-        sdk::FVector2D fromScreen;
-        sdk::FVector2D toScreen;
-        if (!sdk::world_to_screen(from, camera, screenWidth, screenHeight, fromScreen)) {
-            continue;
-        }
-        if (!sdk::world_to_screen(to, camera, screenWidth, screenHeight, toScreen)) {
-            continue;
-        }
-
-        draw::line(list, static_cast<float>(fromScreen.X), static_cast<float>(fromScreen.Y),
-                   static_cast<float>(toScreen.X), static_cast<float>(toScreen.Y), color, thickness);
-    }
-}
+const BoneLink kSkeleton[] = {
+    {0, 1},   {1, 2},   {2, 3},   {3, 4},   {4, 5},   {5, 6},   {6, 7},
+    {5, 8},   {8, 9},   {9, 10},  {10, 11}, {5, 12},  {12, 13}, {13, 14},
+    {14, 15}, {0, 16},  {16, 17}, {17, 18}, {0, 19},  {19, 20}, {20, 21},
+};
 
 } // namespace
 
-void draw(const sdk::Camera& camera, const std::vector<sdk::Player>& players) {
-    config::Config& config = cfg();
-    if (!config.esp_enabled || !camera.valid) {
+void tick() {
+    if (!config::g.esp_enabled || !sdk::alive()) {
         return;
     }
 
-    ImDrawList* list = ImGui::GetBackgroundDrawList();
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    const double screenWidth = display.x;
-    const double screenHeight = display.y;
+    const ImU32 color = draw::rgba(config::g.esp_color);
+    const ImU32 teamColor = draw::rgba(config::g.esp_team_color);
+    const int localTeam = sdk::local_team();
 
-    const int team = sdk::local_team();
-    const float thickness = config.esp_thickness;
-
-    for (const sdk::Player& player : players) {
-        if (!player.valid) {
-            continue;
-        }
-        if (player.is_local && !config.esp_local) {
+    for (const sdk::Player& player : sdk::players()) {
+        if (player.isLocal || player.distance > config::g.esp_max_distance) {
             continue;
         }
 
-        const bool teammate = !player.is_local && team > 0 && player.team == team;
-        if (teammate && !config.esp_teammates) {
-            continue;
-        }
-        if (player.distance > config.esp_max_distance) {
+        const bool teammate = player.team == localTeam && localTeam != 0;
+        if (config::g.esp_team_filter && teammate) {
             continue;
         }
 
-        sdk::FVector2D headScreen;
-        sdk::FVector2D feetScreen;
-        if (!sdk::world_to_screen(player.head, camera, screenWidth, screenHeight, headScreen)) {
+        const ImU32 playerColor = teammate ? teamColor : color;
+
+        const sdk::Vector3 head = {player.location.x, player.location.y,
+                                   player.location.z + config::g.esp_head_offset};
+        const sdk::Vector3 feet = {player.location.x, player.location.y,
+                                   player.location.z - config::g.esp_head_offset};
+
+        sdk::Vector2 headScreen;
+        sdk::Vector2 feetScreen;
+        if (!sdk::world_to_screen(head, headScreen) || !sdk::world_to_screen(feet, feetScreen)) {
             continue;
         }
-        if (!sdk::world_to_screen(player.feet, camera, screenWidth, screenHeight, feetScreen)) {
-            continue;
+
+        const float height = feetScreen.y - headScreen.y;
+        const float width = height * 0.55f;
+        const float x = headScreen.x - width / 2.0f;
+
+        if (config::g.esp_box) {
+            draw::box(x, headScreen.y, width, height, playerColor, 1.5f);
         }
 
-        const double boxHeight = feetScreen.Y - headScreen.Y;
-        if (boxHeight < 4.0) {
-            continue;
+        if (config::g.esp_snapline) {
+            draw::line(static_cast<float>(sdk::screen_width) / 2.0f,
+                       static_cast<float>(sdk::screen_height), headScreen.x, feetScreen.y,
+                       playerColor, 1.0f);
         }
 
-        const double boxWidth = boxHeight * 0.55;
-        const double boxX = headScreen.X - boxWidth * 0.5;
-        const double boxY = headScreen.Y;
+        if (config::g.esp_skeleton) {
+            for (const BoneLink& link : kSkeleton) {
+                sdk::Vector3 from;
+                sdk::Vector3 to;
+                if (!sdk::bone_position(player.mesh, link.from, from) ||
+                    !sdk::bone_position(player.mesh, link.to, to)) {
+                    continue;
+                }
 
-        const ImVec4 baseColor = teammate ? config.color_teammate : config.color_box;
-        const ImU32 boxColor = draw::to_color(baseColor);
-        const ImU32 skeletonColor = draw::to_color(config.color_skeleton);
-        const ImU32 nameColor = draw::to_color(config.color_name);
-        const ImU32 distanceColor = draw::to_color(config.color_distance);
+                sdk::Vector2 fromScreen;
+                sdk::Vector2 toScreen;
+                if (!sdk::world_to_screen(from, fromScreen) ||
+                    !sdk::world_to_screen(to, toScreen)) {
+                    continue;
+                }
 
-        if (config.esp_snapline) {
-            draw::line(list, static_cast<float>(screenWidth * 0.5), static_cast<float>(screenHeight),
-                       static_cast<float>(feetScreen.X), static_cast<float>(feetScreen.Y),
-                       draw::to_color(config.color_snapline), thickness);
+                draw::line(fromScreen.x, fromScreen.y, toScreen.x, toScreen.y, playerColor, 1.2f);
+            }
         }
 
-        if (config.esp_box) {
-            draw::rect(list, static_cast<float>(boxX), static_cast<float>(boxY),
-                       static_cast<float>(boxWidth), static_cast<float>(boxHeight), boxColor, thickness, 1.0f);
+        if (config::g.esp_health) {
+            const float ratio = player.health / 100.0f;
+            draw::filled_box(x - 6.0f, headScreen.y, 3.0f, height, IM_COL32(0, 0, 0, 180));
+            draw::filled_box(x - 6.0f, headScreen.y + height * (1.0f - ratio), 3.0f, height * ratio,
+                             IM_COL32(80, 230, 120, 220));
         }
 
-        if (config.esp_skeleton) {
-            draw_skeleton(list, player, camera, screenWidth, screenHeight, skeletonColor, thickness);
+        float textY = headScreen.y - 16.0f;
+
+        if (config::g.esp_name && !player.name.empty()) {
+            char buffer[64];
+            std::snprintf(buffer, sizeof(buffer), "%ls", player.name.substr(0, 20).c_str());
+            draw::outlined_text(headScreen.x, textY, buffer, playerColor, true);
+            textY -= 14.0f;
         }
 
-        if (config.esp_health) {
-            const double barX = boxX - 6.0;
-            const double ratio = std::clamp(static_cast<double>(player.health) / 100.0, 0.0, 1.0);
-
-            draw::filled_rect(list, static_cast<float>(barX), static_cast<float>(boxY), 3.0f,
-                              static_cast<float>(boxHeight), IM_COL32(0, 0, 0, 180), 1.0f);
-            draw::filled_rect(list, static_cast<float>(barX),
-                              static_cast<float>(boxY + boxHeight * (1.0 - ratio)), 3.0f,
-                              static_cast<float>(boxHeight * ratio), IM_COL32(70, 230, 120, 255), 1.0f);
+        if (config::g.esp_distance) {
+            char buffer[32];
+            std::snprintf(buffer, sizeof(buffer), "%.0fm", player.distance);
+            draw::outlined_text(headScreen.x, feetScreen.y + 2.0f, buffer, playerColor, true);
         }
 
-        char label[160];
-
-        if (config.esp_name) {
-            const std::string name = player.name.empty() ? std::string("joueur") : player.name;
-            draw::text(list, static_cast<float>(headScreen.X), static_cast<float>(boxY - 18.0f),
-                       nameColor, name.c_str(), true, true);
-        }
-
-        if (config.esp_distance) {
-            snprintf(label, sizeof(label), "%.0f m", player.distance);
-            draw::text(list, static_cast<float>(headScreen.X),
-                       static_cast<float>(boxY + boxHeight + 3.0f), distanceColor, label, true, true);
-        }
-
-        if (config.esp_knocked && player.knocked) {
-            draw::text(list, static_cast<float>(boxX + boxWidth + 6.0f), static_cast<float>(boxY),
-                       IM_COL32(255, 200, 60, 255), "DBNO", false, true);
+        if (player.isDBNO) {
+            draw::outlined_text(headScreen.x, textY - 14.0f, "DBNO", IM_COL32(255, 180, 60, 255),
+                                true);
         }
     }
 }
 
-} // namespace esp
+} // namespace features::esp
