@@ -69,12 +69,10 @@ if defined DO_CLEAN (
 if "%DO_BUILD%"=="1" (
     if not exist "%BUILD%\CMakeCache.txt" (
         echo [*] Configuration ^(x64^)...
-        cmake -S "%ROOT%." -B "%BUILD%" -G "Visual Studio 17 2022" -A x64
-        if errorlevel 1 (
-            if exist "%BUILD%" rmdir /s /q "%BUILD%"
-            cmake -S "%ROOT%." -B "%BUILD%" -A x64
-            if errorlevel 1 goto fail
-        )
+        rem Pas de -G : CMake choisit le Visual Studio installe (VS 2022 -> v143,
+        rem VS 2026 -> v144). Forcer "17 2022" casse si seul VS 18 est present (MSB8020).
+        cmake -S "%ROOT%." -B "%BUILD%" -A x64
+        if errorlevel 1 goto fail
     )
     echo [*] Compilation ^(%CONFIG%^)...
     cmake --build "%BUILD%" --config %CONFIG% --parallel
