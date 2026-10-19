@@ -18,6 +18,9 @@ add_executable(RetracOGFN-Launcher WIN32
     Resource.cpp
     "${RETRAC_RESOURCE_RC}")
 
+# _WIN32_WINNT : necessaire pour TokenElevation / PROCESS_QUERY_LIMITED_INFORMATION.
+target_compile_definitions(RetracOGFN-Launcher PRIVATE _WIN32_WINNT=0x0601)
+
 target_link_libraries(RetracOGFN-Launcher PRIVATE common shell32)
 
 # La DLL doit exister avant la compilation de la ressource.
@@ -30,7 +33,7 @@ set_property(SOURCE "${RETRAC_RESOURCE_RC}" APPEND PROPERTY OBJECT_DEPENDS "$<TA
 # l'ouverture d'un handle Fortnite a un process non eleve).
 target_link_options(RetracOGFN-Launcher PRIVATE
     "/MANIFESTUAC:NO"
-    "/MANIFESTINPUT:${CMAKE_CURRENT_SOURCE_DIR}/RetracOGFN.manifest")
+    "/MANIFESTINPUT:\"${CMAKE_CURRENT_SOURCE_DIR}/RetracOGFN.manifest\"")
 
 set_target_properties(RetracOGFN-Launcher PROPERTIES
     OUTPUT_NAME "RetracOGFN")

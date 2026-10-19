@@ -19,14 +19,32 @@ std::wstring lower(std::wstring value) {
     return value;
 }
 
+// Lecture du jeton : TokenElevation = etat UAC reel, contrairement a
+// CheckTokenMembership qui reste vrai pour un membre non eleve.
+bool token_is_elevated(HANDLE process) {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(process, TOKEN_QUERY, &token)) {
+        return false;
+    }
+
+    TOKEN_ELEVATION elevation{};
+    DWORD size = sizeof(elevation);
+    const BOOL ok = GetTokenInformation(token, TokenElevation, &elevation, size, &size);
+    CloseHandle(token);
+
+    return ok != FALSE && elevation.TokenIsElevated != 0;
+}
+
 // Fortnite + EasyAntiCheat : on retente l'ouverture du handle pendant un moment,
 // avec plusieurs jeux de droits, car l'anti-cheat peut refuser temporairement.
+// Ordre du plus permissif au plus tolerant (certains anti-cheats refusent
+// PROCESS_QUERY_INFORMATION tout en acceptant PROCESS_QUERY_LIMITED_INFORMATION).
 constexpr DWORD kAccessMasks[] = {
     PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
         PROCESS_VM_WRITE | PROCESS_VM_READ,
-    PROCESS_ALL_ACCESS,
     PROCESS_CREATE_THREAD | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
-        PROCESS_VM_WRITE | PROCESS_VM_READ | SYNCHRONIZE,
+        PROCESS_VM_WRITE | PROCESS_VM_READ,
+    PROCESS_ALL_ACCESS,
 };
 
 HANDLE open_target(DWORD pid, DWORD& lastError) {
@@ -87,17 +105,19 @@ bool enable_debug_privilege() {
 }
 
 bool is_elevated() {
-    BOOL isMember = FALSE;
-    SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
-    PSID administrators = nullptr;
+    return token_is_elevated(GetCurrentProcess());
+}
 
-    if (AllocateAndInitializeSid(&authority, 2, SECURITY_BUILTIN_DOMAIN_RID,
-                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &administrators)) {
-        CheckTokenMembership(nullptr, administrators, &isMember);
-        FreeSid(administrators);
+bool is_process_elevated(DWORD pid) {
+    // PROCESS_QUERY_LIMITED_INFORMATION est accorde meme depuis un process non
+    // eleve : on peut donc tester le jeton de la cible sans droits d'ecriture.
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!process) {
+        return false;
     }
-
-    return isMember != FALSE;
+    const bool elevated = token_is_elevated(process);
+    CloseHandle(process);
+    return elevated;
 }
 
 bool relaunch_elevated() {
@@ -106,9 +126,23 @@ bool relaunch_elevated() {
         return false;
     }
 
-    const HINSTANCE result =
-        ShellExecuteW(nullptr, L"runas", path, L"--elevated", nullptr, SW_SHOWNORMAL);
-    return reinterpret_cast<INT_PTR>(result) > 32;
+    SHELLEXECUTEINFOW info{};
+    info.cbSize = sizeof(info);
+    info.fMask = SEE_MASK_NOCLOSEPROCESS;
+    info.lpVerb = L"runas";
+    info.lpFile = path;
+    info.lpParameters = L"--elevated";
+    info.nShow = SW_SHOWNORMAL;
+
+    if (!ShellExecuteExW(&info)) {
+        // UAC refuse par l'utilisateur : pas de nouveau process lance.
+        return false;
+    }
+
+    if (info.hProcess) {
+        CloseHandle(info.hProcess);
+    }
+    return true;
 }
 
 DWORD find_process_id(const wchar_t* exeName) {
@@ -165,9 +199,17 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
     HANDLE process = open_target(pid, lastError);
     if (!process) {
         if (lastError == ERROR_ACCESS_DENIED) {
-            error = "acces refuse (code 5). Relance RetracOGFN.exe en administrateur "
-                    "(clic droit > Executer en tant qu'administrateur) et injecte de "
-                    "preference une fois que tu es dans le lobby.";
+            if (!is_elevated()) {
+                error = "acces refuse (code 5) : le jeu tourne en administrateur mais pas ce "
+                        "programme. Ferme cette fenetre et relance RetracOGFN.exe en "
+                        "administrateur (accepte l'UAC).";
+            } else if (is_process_elevated(pid)) {
+                error = "acces refuse (code 5) malgre l'elevation. Ferme Overwolf / MSI "
+                        "Afterburner / RivaTuner et reessaie, puis injecte une fois dans le "
+                        "lobby.";
+            } else {
+                error = "acces refuse (code 5) sur le process cible.";
+            }
         } else if (lastError == ERROR_INVALID_PARAMETER) {
             error = "le process a disparu (code 87). Relance Fortnite puis reessaie.";
         } else {
