@@ -6,8 +6,11 @@ namespace resources {
 
 namespace {
 
+// MAKEINTRESOURCEW explicitement : ne depend pas de la definition de UNICODE.
+constexpr WORD kResourceId = 10; // RT_RCDATA
+
 HRSRC find_resource() {
-    return FindResourceW(nullptr, L"RETRAC_CHEAT_DLL", RT_RCDATA);
+    return FindResourceW(nullptr, L"RETRAC_CHEAT_DLL", MAKEINTRESOURCEW(kResourceId));
 }
 
 } // namespace
