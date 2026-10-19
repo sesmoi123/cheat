@@ -1,11 +1,7 @@
 #pragma once
 
-#include <vector>
+namespace features::esp {
 
-#include "SDK/UE.hpp"
+void tick();
 
-namespace esp {
-
-void draw(const sdk::Camera& camera, const std::vector<sdk::Player>& players);
-
-} // namespace esp
+} // namespace features::esp

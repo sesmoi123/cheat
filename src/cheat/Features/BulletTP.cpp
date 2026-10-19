@@ -1,74 +1,59 @@
 #include "Features/BulletTP.hpp"
 
-#include <algorithm>
-#include <cmath>
-
-#include <imgui.h>
-
 #include "Config.hpp"
 #include "Memory.hpp"
+#include "SDK/Offsets.hpp"
+#include "SDK/SDK.hpp"
 
-namespace bullet_tp {
+#include <windows.h>
 
-namespace {
+#include <cmath>
 
-bool key_down(int key) {
-    return (GetAsyncKeyState(key) & 0x8000) != 0;
-}
+namespace features::bullet_tp {
 
-} // namespace
-
-void update(const sdk::Camera& camera, const std::vector<sdk::Player>& players) {
-    config::Config& config = cfg();
-
-    if (!config.bullet_tp || !camera.valid) {
-        return;
-    }
-    if (!config.bullet_tp_always && !key_down(config.bullet_tp_key)) {
+void tick() {
+    if (!config::g.bullet_tp || !sdk::alive()) {
         return;
     }
 
-    const uintptr_t pawn = sdk::get_local_pawn();
+    if (!config::g.bullet_always && (GetAsyncKeyState(config::g.bullet_key) & 0x8000) == 0) {
+        return;
+    }
+
+    const uintptr_t pawn = sdk::local_pawn();
     if (!pawn) {
         return;
     }
 
-    const uintptr_t weapon = mem::read<uintptr_t>(pawn + off::get().Pawn_CurrentWeapon);
+    const uintptr_t weapon = memory::read<uintptr_t>(pawn + offsets::g.Pawn_CurrentWeapon);
     if (!weapon) {
         return;
     }
 
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    const double screenWidth = display.x;
-    const double screenHeight = display.y;
-    const double centerX = screenWidth * 0.5;
-    const double centerY = screenHeight * 0.5;
-
-    const double radius = sdk::fov_to_pixels(config.bullet_tp_fov, camera.fov, screenWidth);
-    const int team = sdk::local_team();
-
+    // Cible : le joueur le plus proche du reticule.
     const sdk::Player* best = nullptr;
-    double bestScore = radius;
+    double bestOffset = config::g.aim_fov;
 
-    for (const sdk::Player& player : players) {
-        if (!player.valid || player.is_local) {
-            continue;
-        }
-        if (team > 0 && player.team == team) {
+    for (const sdk::Player& player : sdk::players()) {
+        if (player.isLocal) {
             continue;
         }
 
-        sdk::FVector2D screen;
-        if (!sdk::world_to_screen(player.head, camera, screenWidth, screenHeight, screen)) {
+        const sdk::Vector3 point{player.location.x, player.location.y,
+                                 player.location.z +
+                                     config::g.esp_head_offset * config::g.bone_chest};
+
+        sdk::Vector2 screen;
+        if (!sdk::world_to_screen(point, screen)) {
             continue;
         }
 
-        const double dx = screen.X - centerX;
-        const double dy = screen.Y - centerY;
-        const double distance = std::sqrt(dx * dx + dy * dy);
+        const double dx = screen.x - sdk::screen_width / 2.0;
+        const double dy = screen.y - sdk::screen_height / 2.0;
+        const double offset = std::sqrt(dx * dx + dy * dy);
 
-        if (distance < bestScore) {
-            bestScore = distance;
+        if (offset < bestOffset) {
+            bestOffset = offset;
             best = &player;
         }
     }
@@ -77,11 +62,11 @@ void update(const sdk::Camera& camera, const std::vector<sdk::Player>& players) 
         return;
     }
 
-    sdk::FVector spawn = best->head;
-    spawn.Z += static_cast<double>(config.bullet_tp_height);
+    const sdk::Vector3 spawn{best->location.x, best->location.y,
+                             best->location.z +
+                                 config::g.esp_head_offset * config::g.bone_chest};
 
-    mem::write(weapon + off::get().Weapon_FireStartLocation, spawn);
-    mem::write(weapon + off::get().Weapon_LastFireLocation, spawn);
+    memory::write<sdk::Vector3>(weapon + offsets::g.Weapon_ProjectileSpawn, spawn);
 }
 
-} // namespace bullet_tp
+} // namespace features::bullet_tp

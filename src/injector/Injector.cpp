@@ -1,12 +1,13 @@
 #include "Injector.hpp"
 
-#include <shellapi.h>
+#include "Elevation.hpp"
+
 #include <tlhelp32.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cwctype>
 #include <thread>
-#include <vector>
 
 namespace injector {
 
@@ -19,26 +20,41 @@ std::wstring lower(std::wstring value) {
     return value;
 }
 
-// Lecture du jeton : TokenElevation = etat UAC reel, contrairement a
-// CheckTokenMembership qui reste vrai pour un membre non eleve.
-bool token_is_elevated(HANDLE process) {
-    HANDLE token = nullptr;
-    if (!OpenProcessToken(process, TOKEN_QUERY, &token)) {
-        return false;
-    }
-
-    TOKEN_ELEVATION elevation{};
-    DWORD size = sizeof(elevation);
-    const BOOL ok = GetTokenInformation(token, TokenElevation, &elevation, size, &size);
-    CloseHandle(token);
-
-    return ok != FALSE && elevation.TokenIsElevated != 0;
+bool starts_with(const std::wstring& value, const wchar_t* prefix) {
+    const size_t length = wcslen(prefix);
+    return value.size() >= length && value.compare(0, length, prefix) == 0;
 }
 
-// Fortnite + EasyAntiCheat : on retente l'ouverture du handle pendant un moment,
-// avec plusieurs jeux de droits, car l'anti-cheat peut refuser temporairement.
-// Ordre du plus permissif au plus tolerant (certains anti-cheats refusent
-// PROCESS_QUERY_INFORMATION tout en acceptant PROCESS_QUERY_LIMITED_INFORMATION).
+// Toutes les variantes de client Fortnite, sans dependre d'un suffixe precis.
+bool is_fortnite_client(const std::wstring& raw) {
+    const std::wstring name = lower(raw);
+    if (name.size() < 5 || name.compare(name.size() - 4, 4, L".exe") != 0) {
+        return false;
+    }
+    if (name == L"fortnitelauncher.exe") {
+        return false;
+    }
+    if (starts_with(name, L"fortniteclient")) {
+        return true; // _EAC, _EAC_EOS, _BE, futurs suffixes...
+    }
+    return name == L"fortnite.exe";
+}
+
+int preference(const std::wstring& raw) {
+    const std::wstring name = lower(raw);
+    if (name == L"fortniteclient-win64-shipping.exe") {
+        return 0;
+    }
+    if (starts_with(name, L"fortniteclient-win64-shipping")) {
+        return 1;
+    }
+    if (starts_with(name, L"fortniteclient")) {
+        return 2;
+    }
+    return 3;
+}
+
+// Droits demandes, du plus complet au plus tolerant.
 constexpr DWORD kAccessMasks[] = {
     PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
         PROCESS_VM_WRITE | PROCESS_VM_READ,
@@ -47,8 +63,9 @@ constexpr DWORD kAccessMasks[] = {
     PROCESS_ALL_ACCESS,
 };
 
+// EAC peut refuser le handle quelques secondes : on retente 20 s.
 HANDLE open_target(DWORD pid, DWORD& lastError) {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
 
     for (;;) {
         for (const DWORD access : kAccessMasks) {
@@ -68,148 +85,79 @@ HANDLE open_target(DWORD pid, DWORD& lastError) {
 
 } // namespace
 
-std::wstring module_directory(HMODULE module) {
-    wchar_t buffer[MAX_PATH]{};
-    const DWORD length = GetModuleFileNameW(module, buffer, MAX_PATH);
-    if (!length) {
-        return L".";
-    }
-    std::wstring path(buffer, length);
-    const size_t position = path.find_last_of(L"\\/");
-    return position == std::wstring::npos ? std::wstring(L".") : path.substr(0, position);
-}
-
-bool enable_debug_privilege() {
-    HANDLE token = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
-        return false;
-    }
-
-    LUID luid{};
-    if (!LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &luid)) {
-        CloseHandle(token);
-        return false;
-    }
-
-    TOKEN_PRIVILEGES privileges{};
-    privileges.PrivilegeCount = 1;
-    privileges.Privileges[0].Luid = luid;
-    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-
-    const BOOL adjusted =
-        AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), nullptr, nullptr);
-    const DWORD lastError = GetLastError();
-    CloseHandle(token);
-
-    return adjusted != FALSE && lastError == ERROR_SUCCESS;
-}
-
-bool is_elevated() {
-    return token_is_elevated(GetCurrentProcess());
-}
-
-bool is_process_elevated(DWORD pid) {
-    // PROCESS_QUERY_LIMITED_INFORMATION est accorde meme depuis un process non
-    // eleve : on peut donc tester le jeton de la cible sans droits d'ecriture.
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!process) {
-        return false;
-    }
-    const bool elevated = token_is_elevated(process);
-    CloseHandle(process);
-    return elevated;
-}
-
-bool relaunch_elevated() {
-    wchar_t path[MAX_PATH]{};
-    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) {
-        return false;
-    }
-
-    SHELLEXECUTEINFOW info{};
-    info.cbSize = sizeof(info);
-    info.fMask = SEE_MASK_NOCLOSEPROCESS;
-    info.lpVerb = L"runas";
-    info.lpFile = path;
-    info.lpParameters = L"--elevated";
-    info.nShow = SW_SHOWNORMAL;
-
-    if (!ShellExecuteExW(&info)) {
-        // UAC refuse par l'utilisateur : pas de nouveau process lance.
-        return false;
-    }
-
-    if (info.hProcess) {
-        CloseHandle(info.hProcess);
-    }
-    return true;
-}
-
-DWORD find_process_id(const wchar_t* exeName) {
-    if (!exeName) {
-        return 0;
-    }
-
-    const std::wstring wanted = lower(exeName);
+std::vector<Target> find_fortnite_processes() {
+    std::vector<Target> found;
 
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {
-        return 0;
+        return found;
     }
 
     PROCESSENTRY32W entry{};
     entry.dwSize = sizeof(entry);
 
-    DWORD result = 0;
     if (Process32FirstW(snapshot, &entry)) {
         do {
-            if (lower(entry.szExeFile) == wanted) {
-                result = entry.th32ProcessID;
-                break;
+            const std::wstring name = entry.szExeFile;
+            if (is_fortnite_client(name)) {
+                Target target;
+                target.pid = entry.th32ProcessID;
+                target.name = name;
+                found.push_back(target);
             }
         } while (Process32NextW(snapshot, &entry));
     }
 
     CloseHandle(snapshot);
-    return result;
+
+    std::sort(found.begin(), found.end(), [](const Target& a, const Target& b) {
+        const int left = preference(a.name);
+        const int right = preference(b.name);
+        if (left != right) {
+            return left < right;
+        }
+        return a.pid < b.pid;
+    });
+
+    return found;
 }
 
-bool wait_for_process(const wchar_t* exeName, DWORD timeoutMs, DWORD& outPid) {
+bool wait_for_fortnite(DWORD timeoutMs, std::vector<Target>& out) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
 
     for (;;) {
-        const DWORD pid = find_process_id(exeName);
-        if (pid) {
-            outPid = pid;
+        out = find_fortnite_processes();
+        if (!out.empty()) {
             return true;
         }
         if (std::chrono::steady_clock::now() >= deadline) {
             return false;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
+}
+
+bool is_process_alive(DWORD pid) {
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, FALSE, pid);
+    if (!process) {
+        return false;
+    }
+    const DWORD wait = WaitForSingleObject(process, 0);
+    CloseHandle(process);
+    return wait == WAIT_TIMEOUT;
 }
 
 bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) {
     error.clear();
 
-    enable_debug_privilege();
-
     DWORD lastError = 0;
     HANDLE process = open_target(pid, lastError);
     if (!process) {
         if (lastError == ERROR_ACCESS_DENIED) {
-            if (!is_elevated()) {
-                error = "acces refuse (code 5) : le jeu tourne en administrateur mais pas ce "
-                        "programme. Ferme cette fenetre et relance RetracOGFN.exe en "
-                        "administrateur (accepte l'UAC).";
-            } else if (is_process_elevated(pid)) {
-                error = "acces refuse (code 5) malgre l'elevation. Ferme Overwolf / MSI "
-                        "Afterburner / RivaTuner et reessaie, puis injecte une fois dans le "
-                        "lobby.";
-            } else {
-                error = "acces refuse (code 5) sur le process cible.";
-            }
+            error = elevation::is_elevated()
+                        ? "acces refuse (code 5) : ferme Overwolf / Afterburner / RivaTuner, puis "
+                          "injecte dans le lobby."
+                        : "acces refuse (code 5) : relance RetracOGFN.exe en administrateur.";
         } else if (lastError == ERROR_INVALID_PARAMETER) {
             error = "le process a disparu (code 87). Relance Fortnite puis reessaie.";
         } else {
@@ -234,8 +182,8 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
     }
 
     HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
-    auto loadLibrary = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-        GetProcAddress(kernel32, "LoadLibraryW"));
+    auto loadLibrary =
+        reinterpret_cast<LPTHREAD_START_ROUTINE>(GetProcAddress(kernel32, "LoadLibraryW"));
     if (!loadLibrary) {
         error = "LoadLibraryW introuvable";
         VirtualFreeEx(process, remote, 0, MEM_RELEASE);
@@ -251,7 +199,7 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
         return false;
     }
 
-    const DWORD wait = WaitForSingleObject(thread, 20000);
+    const DWORD wait = WaitForSingleObject(thread, 30000);
 
     DWORD exitCode = 0;
     GetExitCodeThread(thread, &exitCode);
@@ -264,7 +212,6 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
         error = "le thread distant n'a pas repondu dans les temps";
         return false;
     }
-
     if (exitCode == 0) {
         error = "LoadLibraryW a renvoye NULL dans le process cible";
         return false;

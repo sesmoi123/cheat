@@ -4,42 +4,39 @@
 # ---------------------------------------------------------------------------
 set(RETRAC_RESOURCE_RC "${CMAKE_BINARY_DIR}/generated/cheat_dll.rc")
 
+# $<SHELL_PATH:...> -> slashes avant : RC interprete les backslashes comme des
+# sequences d'echappement ("\b" dans "build\bin" deviendrait un backspace).
 file(GENERATE
     OUTPUT "${RETRAC_RESOURCE_RC}"
-    CONTENT "RETRAC_CHEAT_DLL RCDATA \"$<TARGET_FILE:RetracCheat>\"\n")
+    CONTENT "RETRAC_CHEAT_DLL RCDATA \"$<SHELL_PATH:$<TARGET_FILE:RetracCheat>>\"\n")
 
 set_source_files_properties("${RETRAC_RESOURCE_RC}" PROPERTIES GENERATED TRUE)
 
 add_executable(RetracOGFN-Launcher WIN32
     main.cpp
+    Elevation.hpp
+    Elevation.cpp
     Injector.hpp
     Injector.cpp
     Resource.hpp
     Resource.cpp
     "${RETRAC_RESOURCE_RC}")
 
-# _WIN32_WINNT : necessaire pour TokenElevation / PROCESS_QUERY_LIMITED_INFORMATION.
-target_compile_definitions(RetracOGFN-Launcher PRIVATE _WIN32_WINNT=0x0601)
+# advapi32 : OpenProcessToken / AdjustTokenPrivileges / LookupPrivilegeValue.
+target_link_libraries(RetracOGFN-Launcher PRIVATE common shell32 advapi32)
 
-target_link_libraries(RetracOGFN-Launcher PRIVATE common shell32)
-
-# La DLL doit exister avant la compilation de la ressource.
 add_dependencies(RetracOGFN-Launcher RetracCheat)
 
-# Recompile la ressource quand la DLL change (sinon l'exe embarquerait l'ancienne).
 set_property(SOURCE "${RETRAC_RESOURCE_RC}" APPEND PROPERTY OBJECT_DEPENDS "$<TARGET_FILE:RetracCheat>")
 
-# Manifest maison : elevation administrateur obligatoire (EasyAntiCheat refuse
-# l'ouverture d'un handle Fortnite a un process non eleve).
+# Manifest maison : elevation administrateur obligatoire.
 target_link_options(RetracOGFN-Launcher PRIVATE
     "/MANIFESTUAC:NO"
     "/MANIFESTINPUT:\"${CMAKE_CURRENT_SOURCE_DIR}/RetracOGFN.manifest\"")
 
-set_target_properties(RetracOGFN-Launcher PROPERTIES
-    OUTPUT_NAME "RetracOGFN")
+set_target_properties(RetracOGFN-Launcher PROPERTIES OUTPUT_NAME "RetracOGFN")
 
-# Copie aussi la DLL a cote de l'exe (pratique en dev). L'exe la prefere si elle
-# est presente, sinon il utilise celle embarquee.
+# Copie la DLL a cote de l'exe (pratique en dev) : l'exe la prefere si presente.
 add_custom_command(TARGET RetracOGFN-Launcher POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "$<TARGET_FILE:RetracCheat>"

@@ -1,84 +1,81 @@
 #include "Features/Aimbot.hpp"
 
-#include <algorithm>
-#include <cmath>
-
-#include <imgui.h>
-
 #include "Config.hpp"
 #include "Memory.hpp"
-#include "Render/Draw.hpp"
+#include "SDK/Offsets.hpp"
+#include "SDK/SDK.hpp"
 
-namespace aimbot {
+#include <windows.h>
+
+#include <cmath>
+
+namespace features::aimbot {
 
 namespace {
 
-sdk::Player currentTarget;
-bool targetValid = false;
-
-bool key_down(int key) {
-    return (GetAsyncKeyState(key) & 0x8000) != 0;
+double normalize(double angle) {
+    while (angle > 180.0) {
+        angle -= 360.0;
+    }
+    while (angle < -180.0) {
+        angle += 360.0;
+    }
+    return angle;
 }
 
-sdk::FVector bone_for_mode(const sdk::Player& player, int mode) {
-    switch (mode) {
-    case 1:
-        return sdk::get_bone(player.mesh, sdk::bones::Chest);
-    case 2:
-        return sdk::get_bone(player.mesh, sdk::bones::Pelvis);
-    default:
-        return player.head;
-    }
+sdk::Vector3 aim_point(const sdk::Player& player) {
+    const double ratio = config::g.aim_bone == 0   ? config::g.bone_head
+                         : config::g.aim_bone == 1 ? config::g.bone_chest
+                                                   : config::g.bone_pelvis;
+    return {player.location.x, player.location.y,
+            player.location.z + config::g.esp_head_offset * ratio};
+}
+
+sdk::Rotator rotation_to(const sdk::Vector3& from, const sdk::Vector3& to) {
+    const sdk::Vector3 delta = sdk::subtract(to, from);
+    const double horizontal = std::sqrt(delta.x * delta.x + delta.y * delta.y);
+
+    sdk::Rotator rotation;
+    rotation.pitch = sdk::rad2deg(std::atan2(delta.z, horizontal));
+    rotation.yaw = sdk::rad2deg(std::atan2(delta.y, delta.x));
+    rotation.roll = 0.0;
+    return rotation;
 }
 
 } // namespace
 
-void update(const sdk::Camera& camera, const std::vector<sdk::Player>& players) {
-    config::Config& config = cfg();
-    targetValid = false;
-
-    if (!config.aim_enabled || !camera.valid) {
+void tick() {
+    if (!config::g.aim_enabled || !sdk::alive()) {
         return;
     }
 
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    const double screenWidth = display.x;
-    const double screenHeight = display.y;
-    const double centerX = screenWidth * 0.5;
-    const double centerY = screenHeight * 0.5;
-
-    const double radius = sdk::fov_to_pixels(config.aim_fov, camera.fov, screenWidth);
-    const int team = sdk::local_team();
+    if (config::g.aim_hold && (GetAsyncKeyState(config::g.aim_key) & 0x8000) == 0) {
+        return;
+    }
 
     const sdk::Player* best = nullptr;
-    double bestScore = radius;
+    double bestOffset = config::g.aim_fov;
+    const int localTeam = sdk::local_team();
 
-    for (const sdk::Player& player : players) {
-        if (!player.valid || player.is_local) {
+    for (const sdk::Player& player : sdk::players()) {
+        if (player.isLocal || player.isDBNO) {
             continue;
         }
-        if (!config.aim_teammates && team > 0 && player.team == team) {
-            continue;
-        }
-        if (player.distance > config.aim_max_distance) {
-            continue;
-        }
-        if (config.aim_visible_only && !player.visible) {
+        if (player.team == localTeam && localTeam != 0) {
             continue;
         }
 
-        const sdk::FVector aimPoint = bone_for_mode(player, config.aim_bone);
-        sdk::FVector2D screen;
-        if (!sdk::world_to_screen(aimPoint, camera, screenWidth, screenHeight, screen)) {
+        sdk::Vector2 screen;
+        if (!sdk::world_to_screen(aim_point(player), screen)) {
             continue;
         }
 
-        const double dx = screen.X - centerX;
-        const double dy = screen.Y - centerY;
-        const double distance = std::sqrt(dx * dx + dy * dy);
+        const double dx = screen.x - sdk::screen_width / 2.0;
+        const double dy = screen.y - sdk::screen_height / 2.0;
+        const double offset = std::sqrt(dx * dx + dy * dy);
 
-        if (distance < bestScore) {
-            bestScore = distance;
+        if (offset < bestOffset) {
+            bestOffset = offset;
             best = &player;
         }
     }
@@ -87,66 +84,38 @@ void update(const sdk::Camera& camera, const std::vector<sdk::Player>& players) 
         return;
     }
 
-    currentTarget = *best;
-    targetValid = true;
+    const sdk::Vector3 target = aim_point(*best);
+    const double step = config::g.aim_smooth <= 0.0f ? 1.0 : 1.0 / config::g.aim_smooth;
 
-    if (!key_down(config.aim_key)) {
-        return;
-    }
-
-    const sdk::FVector aimPoint = bone_for_mode(currentTarget, config.aim_bone);
-    const sdk::FRotator wanted = sdk::find_look_at_rotation(camera.location, aimPoint);
-    const double smooth = std::max(1.0, static_cast<double>(config.aim_smooth));
-
-    if (config.aim_mode == static_cast<int>(config::AimMode::Memory)) {
-        const uintptr_t controller = sdk::get_local_controller();
+    if (config::g.aim_memory) {
+        const uintptr_t controller = sdk::local_controller();
         if (!controller) {
             return;
         }
 
-        const sdk::FRotator current =
-            mem::read<sdk::FRotator>(controller + off::get().Controller_ControlRotation);
-        const sdk::FRotator delta = sdk::shortest_delta(current, wanted);
+        const uintptr_t address = controller + offsets::g.PlayerController_ControlRotation;
+        const sdk::Rotator current = memory::read<sdk::Rotator>(address);
+        const sdk::Rotator wanted = rotation_to(sdk::camera_location(), target);
 
-        sdk::FRotator next;
-        next.Pitch = current.Pitch + delta.Pitch / smooth;
-        next.Yaw = current.Yaw + delta.Yaw / smooth;
-        next.Roll = 0.0;
+        sdk::Rotator next;
+        next.pitch = current.pitch + normalize(wanted.pitch - current.pitch) * step;
+        next.yaw = current.yaw + normalize(wanted.yaw - current.yaw) * step;
+        next.roll = 0.0;
 
-        mem::write(controller + off::get().Controller_ControlRotation, next);
+        memory::write<sdk::Rotator>(address, next);
     } else {
-        const sdk::FRotator delta = sdk::shortest_delta(camera.rotation, wanted);
-        const double degreesPerCount = std::max(0.00005, static_cast<double>(config.aim_sensitivity) * 0.022);
-
-        const long moveX = static_cast<long>(std::lround(delta.Yaw / degreesPerCount / smooth));
-        const long moveY = static_cast<long>(std::lround(-delta.Pitch / degreesPerCount / smooth));
-
-        if (moveX || moveY) {
-            mouse_event(MOUSEEVENTF_MOVE, static_cast<DWORD>(moveX), static_cast<DWORD>(moveY), 0, 0);
+        sdk::Vector2 screen;
+        if (!sdk::world_to_screen(target, screen)) {
+            return;
         }
+
+        INPUT input{};
+        input.type = INPUT_MOUSE;
+        input.mi.dx = static_cast<LONG>((screen.x - sdk::screen_width / 2.0) * step);
+        input.mi.dy = static_cast<LONG>((screen.y - sdk::screen_height / 2.0) * step);
+        input.mi.dwFlags = MOUSEEVENTF_MOVE;
+        SendInput(1, &input, sizeof(input));
     }
 }
 
-void draw_fov(const sdk::Camera& camera) {
-    config::Config& config = cfg();
-    if (!config.aim_enabled || !config.aim_draw_fov || !camera.valid) {
-        return;
-    }
-
-    ImDrawList* list = ImGui::GetBackgroundDrawList();
-    const ImVec2 display = ImGui::GetIO().DisplaySize;
-    const double radius = sdk::fov_to_pixels(config.aim_fov, camera.fov, display.x);
-
-    const ImU32 color = targetValid ? IM_COL32(255, 255, 255, 200) : IM_COL32(153, 102, 255, 170);
-    draw::circle(list, display.x * 0.5f, display.y * 0.5f, static_cast<float>(radius), color, 1.4f, 64);
-}
-
-bool has_target() {
-    return targetValid;
-}
-
-const sdk::Player& target() {
-    return currentTarget;
-}
-
-} // namespace aimbot
+} // namespace features::aimbot

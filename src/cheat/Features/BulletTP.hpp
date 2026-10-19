@@ -1,11 +1,7 @@
 #pragma once
 
-#include <vector>
+namespace features::bullet_tp {
 
-#include "SDK/UE.hpp"
+void tick();
 
-namespace bullet_tp {
-
-void update(const sdk::Camera& camera, const std::vector<sdk::Player>& players);
-
-} // namespace bullet_tp
+} // namespace features::bullet_tp

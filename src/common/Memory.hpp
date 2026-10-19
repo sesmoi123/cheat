@@ -3,50 +3,20 @@
 #include <windows.h>
 
 #include <cstdint>
-#include <cstring>
+#include <initializer_list>
+#include <string>
 
-namespace mem {
+namespace memory {
 
-inline uintptr_t module_base(const char* moduleName = nullptr) {
-    return reinterpret_cast<uintptr_t>(GetModuleHandleA(moduleName));
-}
+bool readable(uintptr_t address, size_t size);
 
-inline bool valid(uintptr_t address, size_t size = 1) {
+template <typename T>
+bool read(uintptr_t address, T& out) {
     if (!address) {
         return false;
     }
-    MEMORY_BASIC_INFORMATION info{};
-    if (!VirtualQuery(reinterpret_cast<LPCVOID>(address), &info, sizeof(info))) {
-        return false;
-    }
-    if (info.State != MEM_COMMIT) {
-        return false;
-    }
-    const DWORD protect = info.Protect;
-    if ((protect & PAGE_NOACCESS) || (protect & PAGE_GUARD)) {
-        return false;
-    }
-    return size <= info.RegionSize;
-}
-
-inline bool read_bytes(uintptr_t address, void* out, size_t size) {
-    if (!address || !out || !size) {
-        return false;
-    }
     __try {
-        std::memcpy(out, reinterpret_cast<const void*>(address), size);
-        return true;
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-inline bool write_bytes(uintptr_t address, const void* data, size_t size) {
-    if (!address || !data || !size) {
-        return false;
-    }
-    __try {
-        std::memcpy(reinterpret_cast<void*>(address), data, size);
+        out = *reinterpret_cast<const T*>(address);
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return false;
@@ -54,31 +24,40 @@ inline bool write_bytes(uintptr_t address, const void* data, size_t size) {
 }
 
 template <typename T>
-inline bool read_safe(uintptr_t address, T& out) {
-    return read_bytes(address, &out, sizeof(T));
-}
-
-template <typename T>
-inline T read(uintptr_t address) {
+T read(uintptr_t address) {
     T value{};
-    read_safe(address, value);
+    read(address, value);
     return value;
 }
 
 template <typename T>
-inline bool write(uintptr_t address, const T& value) {
-    return write_bytes(address, &value, sizeof(T));
+bool write(uintptr_t address, const T& value) {
+    if (!address) {
+        return false;
+    }
+    __try {
+        *reinterpret_cast<T*>(address) = value;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
 }
 
-inline uintptr_t read_ptr(uintptr_t address) {
-    return read<uintptr_t>(address);
-}
-
-template <typename... Offsets>
-inline uintptr_t chain(uintptr_t base, Offsets... offsets) {
+// Suit une chaine de pointeurs : base + offset0 -> deref -> + offset1 -> ...
+inline uintptr_t follow(uintptr_t base, std::initializer_list<uintptr_t> offsets) {
     uintptr_t address = base;
-    ((address = address ? read_ptr(address + offsets) : 0), ...);
+    for (uintptr_t offset : offsets) {
+        if (!address) {
+            return 0;
+        }
+        address = read<uintptr_t>(address + offset);
+    }
     return address;
 }
 
-} // namespace mem
+std::string read_string(uintptr_t address, size_t maxLength = 64);
+
+uintptr_t module_base(const wchar_t* moduleName);
+size_t module_size(const wchar_t* moduleName);
+
+} // namespace memory
