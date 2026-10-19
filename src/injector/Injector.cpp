@@ -1,5 +1,6 @@
 #include "Injector.hpp"
 
+#include <shellapi.h>
 #include <tlhelp32.h>
 
 #include <chrono>
@@ -18,6 +19,35 @@ std::wstring lower(std::wstring value) {
     return value;
 }
 
+// Fortnite + EasyAntiCheat : on retente l'ouverture du handle pendant un moment,
+// avec plusieurs jeux de droits, car l'anti-cheat peut refuser temporairement.
+constexpr DWORD kAccessMasks[] = {
+    PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
+        PROCESS_VM_WRITE | PROCESS_VM_READ,
+    PROCESS_ALL_ACCESS,
+    PROCESS_CREATE_THREAD | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
+        PROCESS_VM_WRITE | PROCESS_VM_READ | SYNCHRONIZE,
+};
+
+HANDLE open_target(DWORD pid, DWORD& lastError) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+
+    for (;;) {
+        for (const DWORD access : kAccessMasks) {
+            HANDLE process = OpenProcess(access, FALSE, pid);
+            if (process) {
+                return process;
+            }
+            lastError = GetLastError();
+        }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return nullptr;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    }
+}
+
 } // namespace
 
 std::wstring module_directory(HMODULE module) {
@@ -29,6 +59,56 @@ std::wstring module_directory(HMODULE module) {
     std::wstring path(buffer, length);
     const size_t position = path.find_last_of(L"\\/");
     return position == std::wstring::npos ? std::wstring(L".") : path.substr(0, position);
+}
+
+bool enable_debug_privilege() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token)) {
+        return false;
+    }
+
+    LUID luid{};
+    if (!LookupPrivilegeValueW(nullptr, SE_DEBUG_NAME, &luid)) {
+        CloseHandle(token);
+        return false;
+    }
+
+    TOKEN_PRIVILEGES privileges{};
+    privileges.PrivilegeCount = 1;
+    privileges.Privileges[0].Luid = luid;
+    privileges.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+    const BOOL adjusted =
+        AdjustTokenPrivileges(token, FALSE, &privileges, sizeof(privileges), nullptr, nullptr);
+    const DWORD lastError = GetLastError();
+    CloseHandle(token);
+
+    return adjusted != FALSE && lastError == ERROR_SUCCESS;
+}
+
+bool is_elevated() {
+    BOOL isMember = FALSE;
+    SID_IDENTIFIER_AUTHORITY authority = SECURITY_NT_AUTHORITY;
+    PSID administrators = nullptr;
+
+    if (AllocateAndInitializeSid(&authority, 2, SECURITY_BUILTIN_DOMAIN_RID,
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, &administrators)) {
+        CheckTokenMembership(nullptr, administrators, &isMember);
+        FreeSid(administrators);
+    }
+
+    return isMember != FALSE;
+}
+
+bool relaunch_elevated() {
+    wchar_t path[MAX_PATH]{};
+    if (!GetModuleFileNameW(nullptr, path, MAX_PATH)) {
+        return false;
+    }
+
+    const HINSTANCE result =
+        ShellExecuteW(nullptr, L"runas", path, L"--elevated", nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(result) > 32;
 }
 
 DWORD find_process_id(const wchar_t* exeName) {
@@ -79,14 +159,20 @@ bool wait_for_process(const wchar_t* exeName, DWORD timeoutMs, DWORD& outPid) {
 bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) {
     error.clear();
 
-    HANDLE process = OpenProcess(PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION |
-                                     PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
-                                 FALSE, pid);
+    enable_debug_privilege();
+
+    DWORD lastError = 0;
+    HANDLE process = open_target(pid, lastError);
     if (!process) {
-        process = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
-    }
-    if (!process) {
-        error = "OpenProcess a echoue (code " + std::to_string(GetLastError()) + ")";
+        if (lastError == ERROR_ACCESS_DENIED) {
+            error = "acces refuse (code 5). Relance RetracOGFN.exe en administrateur "
+                    "(clic droit > Executer en tant qu'administrateur) et injecte de "
+                    "preference une fois que tu es dans le lobby.";
+        } else if (lastError == ERROR_INVALID_PARAMETER) {
+            error = "le process a disparu (code 87). Relance Fortnite puis reessaie.";
+        } else {
+            error = "OpenProcess a echoue (code " + std::to_string(lastError) + ")";
+        }
         return false;
     }
 
@@ -123,7 +209,7 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
         return false;
     }
 
-    WaitForSingleObject(thread, 15000);
+    const DWORD wait = WaitForSingleObject(thread, 20000);
 
     DWORD exitCode = 0;
     GetExitCodeThread(thread, &exitCode);
@@ -131,6 +217,11 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
     CloseHandle(thread);
     VirtualFreeEx(process, remote, 0, MEM_RELEASE);
     CloseHandle(process);
+
+    if (wait != WAIT_OBJECT_0) {
+        error = "le thread distant n'a pas repondu dans les temps";
+        return false;
+    }
 
     if (exitCode == 0) {
         error = "LoadLibraryW a renvoye NULL dans le process cible";
