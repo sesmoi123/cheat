@@ -20,12 +20,15 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error);
 
 std::wstring module_directory(HMODULE module);
 
-// Active SeDebugPrivilege sur le process courant (aide quand le jeu tourne
-// sous un autre jeton / est lance en administrateur).
+// Active SeDebugPrivilege sur le process courant.
 bool enable_debug_privilege();
 
-// Le process courant est-il membre du groupe Administrateurs et eleve ?
+// Le process courant est-il ELEVE ? (jeton UAC reel, PAS juste membre du groupe
+// Administrateurs : sous UAC un membre non eleve conserve quand meme ce SID.)
 bool is_elevated();
+
+// Le process cible tourne-t-il en administrateur ?
+bool is_process_elevated(DWORD pid);
 
 // Relance l'exe avec l'elevation UAC (marqueur --elevated pour eviter les boucles).
 bool relaunch_elevated();

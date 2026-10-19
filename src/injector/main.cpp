@@ -119,16 +119,17 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     enable_colors();
     banner();
 
-    // Fortnite tourne avec EasyAntiCheat : sans elevation, OpenProcess renvoie
-    // "acces refuse" (code 5). Le manifest demande deja l'UAC ; ceci est le
-    // filet de securite si l'elevation n'a pas ete appliquee.
+    // Fortnite tourne avec EasyAntiCheat, donc en administrateur. Un process non
+    // eleve ne peut pas demander PROCESS_VM_WRITE sur un process eleve :
+    // OpenProcess renvoie "acces refuse" (code 5). L'elevation est OBLIGATOIRE.
     if (!injector::is_elevated()) {
         if (!is_relaunched() && injector::relaunch_elevated()) {
             log_line("info", "96", "Elevation demandee (UAC) - relance en administrateur...");
             Sleep(1500);
             return 0;
         }
-        log_line("avert", "93", "Pas en administrateur : l'injection peut echouer.");
+        log_line("avert", "93", "Pas en administrateur : l'injection va echouer (code 5).");
+        log_line("avert", "93", "Relance en clic droit > Executer en tant qu'administrateur.");
     } else {
         log_line("ok", "92", "Droits administrateur actifs");
     }
@@ -166,6 +167,11 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
     }
 
     log_line("ok", "92", "Process trouve (PID " + std::to_string(pid) + ")");
+
+    if (!injector::is_elevated() && injector::is_process_elevated(pid)) {
+        log_line("avert", "93", "Le jeu tourne en administrateur, ce programme non.");
+    }
+
     log_line("info", "96", "Injection en cours...");
 
     if (!injector::inject_library(pid, dllPath, error)) {
