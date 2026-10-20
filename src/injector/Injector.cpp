@@ -60,13 +60,17 @@ int preference(const std::wstring& raw) {
     return 3;
 }
 
-// Droits demandes, du plus complet au plus tolerant.
+// Droits demandes, du plus complet au plus tolerant. EAC refuse certaines
+// combinaisons pendant son initialisation : on essaie tout.
 constexpr DWORD kAccessMasks[] = {
     PROCESS_CREATE_THREAD | PROCESS_QUERY_INFORMATION | PROCESS_VM_OPERATION |
         PROCESS_VM_WRITE | PROCESS_VM_READ,
     PROCESS_CREATE_THREAD | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
         PROCESS_VM_WRITE | PROCESS_VM_READ,
+    PROCESS_CREATE_THREAD | PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ,
     PROCESS_ALL_ACCESS,
+    PROCESS_CREATE_THREAD | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_OPERATION |
+        PROCESS_VM_WRITE | PROCESS_VM_READ | SYNCHRONIZE,
 };
 
 // EAC peut refuser le handle quelques secondes : on retente 20 s.
@@ -91,7 +95,7 @@ HANDLE open_target(DWORD pid, DWORD& lastError) {
 
 // ---------------------------------------------------------------------------
 // Stub distant : LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH) puis
-// GetLastError(). Le dossier de la DLL est ainsi cherche en premier pour ses
+// GetLastError(). Le dossier de la DLL est cherche en premier pour ses
 // dependances, et on recupere le code d'erreur exact du thread distant.
 // ---------------------------------------------------------------------------
 
@@ -131,7 +135,7 @@ std::vector<uint8_t> build_stub(uintptr_t base) {
     push_u8(code, 0x48); push_u8(code, 0x83); push_u8(code, 0xEC); push_u8(code, 0x28);
 
     push_u8(code, 0x48); push_u8(code, 0xB9); push_u64(code, base + kStubPathOffset);
-    push_u8(code, 0x31); push_u8(code, 0xD2);                                  // xor edx, edx
+    push_u8(code, 0x31); push_u8(code, 0xD2); // xor edx, edx
     push_u8(code, 0x41); push_u8(code, 0xB8);
     push_u8(code, 0x08); push_u8(code, 0x00); push_u8(code, 0x00); push_u8(code, 0x00); // r8d = 8
     push_u8(code, 0x48); push_u8(code, 0xB8); push_u64(code, loadLibraryEx);
@@ -209,8 +213,8 @@ std::string describe_load_error(DWORD code, const std::wstring& where) {
 
     switch (code) {
         case 0:
-            return "EAC n'a pas fini de charger le jeu (aucun code renvoye) : attendre la "
-                   "disparition de la splash EAC (" + path + ")";
+            return "EAC refuse le chargement (aucun code renvoye) : le jeu charge encore (" + path +
+                   ")";
         case ERROR_MOD_NOT_FOUND:
             return "dependance introuvable (code 126) : copie vcruntime140.dll, "
                    "vcruntime140_1.dll, msvcp140.dll et d3dcompiler_47.dll a cote de la DLL (" +
@@ -222,7 +226,8 @@ std::string describe_load_error(DWORD code, const std::wstring& where) {
         case ERROR_DLL_INIT_FAILED:
             return "DllMain a echoue (code 1114) (" + path + ")";
         case ERROR_ACCESS_DENIED:
-            return "acces refuse (code 5) : lance le launcher en administrateur (" + path + ")";
+            return "acces refuse (code 5) : EAC protege encore le process, ou ferme Overwolf / "
+                   "Afterburner / RivaTuner (" + path + ")";
         default:
             return "LoadLibraryExW a echoue (code " + std::to_string(code) + ") (" + path + ")";
     }
@@ -452,22 +457,15 @@ bool is_process_alive(DWORD pid) {
     return wait == WAIT_TIMEOUT;
 }
 
-bool eac_splash_present() {
-    static const wchar_t* const kClasses[] = {L"EAC splash", L"EACsplash",
-                                              L"EasyAntiCheat splash"};
-    for (const wchar_t* name : kClasses) {
-        if (FindWindowW(name, nullptr)) {
-            return true;
-        }
+bool game_window_foreground(DWORD pid) {
+    const HWND window = GetForegroundWindow();
+    if (!window || !pid) {
+        return false;
     }
 
-    static const wchar_t* const kTitles[] = {L"Easy Anti-Cheat", L"EasyAntiCheat"};
-    for (const wchar_t* title : kTitles) {
-        if (FindWindowW(nullptr, title)) {
-            return true;
-        }
-    }
-    return false;
+    DWORD owner = 0;
+    GetWindowThreadProcessId(window, &owner);
+    return owner == pid;
 }
 
 bool probe_local_load(const std::wstring& dllPath, std::string& error) {
@@ -505,8 +503,8 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
     if (!process) {
         if (lastError == ERROR_ACCESS_DENIED) {
             error = elevation::is_elevated()
-                        ? "acces refuse (code 5) : ferme Overwolf / Afterburner / RivaTuner, puis "
-                          "injecte dans le lobby."
+                        ? "acces refuse (code 5) : EAC protege encore le process, ou ferme "
+                          "Overwolf / Afterburner / RivaTuner."
                         : "acces refuse (code 5) : relance RetracOGFN.exe en administrateur.";
         } else if (lastError == ERROR_INVALID_PARAMETER) {
             error = "le process a disparu (code 87). Relance Fortnite puis reessaie.";

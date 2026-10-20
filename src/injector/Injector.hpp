@@ -17,9 +17,9 @@ std::vector<Target> find_fortnite_processes();
 bool wait_for_fortnite(DWORD timeoutMs, std::vector<Target>& out);
 bool is_process_alive(DWORD pid);
 
-// Vrai tant que la splash EAC est a l'ecran : EAC n'a pas fini de charger le jeu
-// et refuse tout LoadLibrary. C'est une fenetre du process EAC, pas du jeu.
-bool eac_splash_present();
+// Vrai si la fenetre au premier plan appartient a ce process. Pendant le
+// chargement EAC c'est la splash EAC qui a le focus, pas la fenetre du jeu.
+bool game_window_foreground(DWORD pid);
 
 // Charge la DLL dans le launcher pour valider le binaire : x64, imports, DllMain.
 bool probe_local_load(const std::wstring& dllPath, std::string& error);
