@@ -15,9 +15,8 @@
 namespace {
 
 constexpr wchar_t kDllName[] = L"RetracOGFN.dll";
-constexpr ULONGLONG kTotalBudgetMs = 180000;   // 3 min de patience au total
-constexpr ULONGLONG kReadyTimeoutMs = 45000;   // attente max du chargement
-constexpr DWORD kAttemptDelayMs = 8000;
+constexpr ULONGLONG kBudgetMs = 180000;
+constexpr DWORD kRetryMs = 5000;
 
 void enable_dpi_awareness() {
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
@@ -76,7 +75,6 @@ void pause() {
     std::cin.get();
 }
 
-// Cherche une DLL a cote de l'exe (mode dev), sinon extrait la DLL embarquee.
 std::wstring resolve_dll(const std::wstring& exeDirectory, std::string& error) {
     const std::wstring sideBySide = exeDirectory + L"\\" + kDllName;
     if (paths::file_exists(sideBySide)) {
@@ -90,7 +88,6 @@ std::wstring resolve_dll(const std::wstring& exeDirectory, std::string& error) {
         return primary;
     }
 
-    // DLL precedente encore verrouillee par le jeu : nom horodate.
     const std::wstring fallback =
         base + L"\\RetracOGFN_" + std::to_wstring(GetTickCount64()) + L".dll";
     if (resources::extract_cheat_dll(fallback, error)) {
@@ -136,32 +133,26 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         return 0;
     }
 
-    const std::wstring exeDirectory = paths::module_directory(nullptr);
+    if (injector::enable_debug_privilege()) {
+        log_line("ok", "92", "SeDebugPrivilege : actif");
+    } else {
+        log_line("avert", "93", "SeDebugPrivilege : indisponible (admin requis)");
+    }
 
     std::string error;
-    const std::wstring dllPath = resolve_dll(exeDirectory, error);
+    const std::wstring dllPath = resolve_dll(paths::module_directory(nullptr), error);
     if (dllPath.empty()) {
-        log_line("erreur", "91", "Extraction de la DLL impossible : " + error);
+        log_line("erreur", "91", "DLL introuvable : " + error);
         pause();
         return 1;
     }
 
     logger::init(paths::to_narrow(paths::data_directory() + L"\\launcher.log"));
-    logger::info("launcher: elevated=%d dll=%s", elevation::is_elevated() ? 1 : 0,
-                 paths::to_narrow(dllPath).c_str());
+    logger::info("launcher: dll=%s", paths::to_narrow(dllPath).c_str());
 
-    log_line("ok", "92", "Cheat pret (" + std::to_string(resources::embedded_dll_size() / 1024) +
+    log_line("ok", "92", "DLL prete (" + std::to_string(resources::embedded_dll_size() / 1024) +
                              " Ko embarques)");
-
-    // Test local : valide le binaire (x64, imports, DllMain) sans EAC ni jeu.
-    std::string probeError;
-    if (injector::probe_local_load(dllPath, probeError)) {
-        log_line("ok", "92", "Test local de la DLL : OK");
-    } else {
-        log_line("avert", "93", "Test local de la DLL : " + probeError);
-    }
-
-    log_line("info", "96", "Recherche de Fortnite...");
+    log_line("info", "96", "Recherche de FortniteClient-Win64-Shipping...");
 
     std::vector<injector::Target> targets;
     if (!injector::wait_for_fortnite(30000, targets)) {
@@ -173,37 +164,31 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
     }
 
-    // EAC protege le process pendant tout le chargement : tant que la fenetre de
-    // jeu n'a pas le focus (c'est la splash EAC qui l'a), on n'y touche pas.
-    log_line("info", "96", "Attente de la fin du chargement EAC (le jeu doit passer au premier "
-                           "plan)...");
+    log_line("info", "96", "Attente du chargement (fenetre de jeu au premier plan)...");
 
     const ULONGLONG start = GetTickCount64();
     DWORD lastPid = 0;
-    int foregroundSeconds = 0;
+    int foreground = 0;
     bool injected = false;
 
-    while (!injected && GetTickCount64() - start < kTotalBudgetMs) {
+    while (!injected && GetTickCount64() - start < kBudgetMs) {
         if (targets.empty() && !injector::wait_for_fortnite(10000, targets)) {
             continue;
         }
 
         const DWORD pid = targets.front().pid;
-
-        // Le jeu a redemarre : on refait l'attente de chargement.
         if (pid != lastPid) {
             lastPid = pid;
-            foregroundSeconds = 0;
+            foreground = 0;
             log_line("info", "96", "Cible : " + paths::to_narrow(targets.front().name) + " (PID " +
                                        std::to_string(pid) + ")");
         }
 
-        const bool loaded = foregroundSeconds >= 3;
-        if (!loaded && GetTickCount64() - start < kReadyTimeoutMs) {
+        // Pendant le chargement EAC, la fenetre du jeu n'a pas le focus.
+        if (foreground < 3 && GetTickCount64() - start < 45000) {
             if (injector::game_window_foreground(pid)) {
-                if (++foregroundSeconds == 3) {
+                if (++foreground == 3) {
                     log_line("ok", "92", "Jeu charge : injection.");
-                    Sleep(2000);
                 }
             }
             Sleep(1000);
@@ -220,8 +205,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
             if (injector::inject_library(target.pid, dllPath, error)) {
                 injected = true;
-                log_line("ok", "92", "Injection reussie !");
-                log_line("info", "96", "Inser ou LB+RB en jeu pour ouvrir le menu.");
+                log_line("ok", "92", "Injection reussie. Inser ou LB+RB en jeu.");
                 break;
             }
 
@@ -230,12 +214,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
         if (!injected) {
             targets.clear();
-            Sleep(kAttemptDelayMs);
+            Sleep(kRetryMs);
         }
     }
 
     if (!injected) {
-        log_line("erreur", "91", "Injection echouee. DirectX 11, dans le lobby, en admin.");
+        log_line("erreur", "91", "Injection echouee.");
     }
 
     pause();
