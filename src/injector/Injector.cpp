@@ -89,62 +89,10 @@ HANDLE open_target(DWORD pid, DWORD& lastError) {
     }
 }
 
-std::wstring process_directory(DWORD pid) {
-    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (!process) {
-        return {};
-    }
-
-    wchar_t buffer[MAX_PATH * 2]{};
-    DWORD size = static_cast<DWORD>(std::size(buffer));
-    std::wstring full;
-    if (QueryFullProcessImageNameW(process, 0, buffer, &size)) {
-        full.assign(buffer, size);
-    }
-    CloseHandle(process);
-
-    const size_t slash = full.find_last_of(L"\\/");
-    return slash == std::wstring::npos ? std::wstring() : full.substr(0, slash);
-}
-
-// Lance une fonction kernel32 a un argument wchar_t* dans le process cible.
-bool run_remote(HANDLE process, const char* function, const std::wstring& argument) {
-    const SIZE_T size = (argument.size() + 1) * sizeof(wchar_t);
-
-    void* remote = VirtualAllocEx(process, nullptr, size, MEM_COMMIT | MEM_RESERVE,
-                                  PAGE_READWRITE);
-    if (!remote) {
-        return false;
-    }
-
-    if (!WriteProcessMemory(process, remote, argument.c_str(), size, nullptr)) {
-        VirtualFreeEx(process, remote, 0, MEM_RELEASE);
-        return false;
-    }
-
-    auto routine = reinterpret_cast<LPTHREAD_START_ROUTINE>(
-        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), function));
-    if (!routine) {
-        VirtualFreeEx(process, remote, 0, MEM_RELEASE);
-        return false;
-    }
-
-    HANDLE thread = CreateRemoteThread(process, nullptr, 0, routine, remote, 0, nullptr);
-    if (!thread) {
-        VirtualFreeEx(process, remote, 0, MEM_RELEASE);
-        return false;
-    }
-
-    const DWORD wait = WaitForSingleObject(thread, 10000);
-    CloseHandle(thread);
-    VirtualFreeEx(process, remote, 0, MEM_RELEASE);
-    return wait == WAIT_OBJECT_0;
-}
-
 // ---------------------------------------------------------------------------
-// Stub distant : LoadLibraryW(path) puis GetLastError(), resultats ecrits en
-// memoire distante. Un CreateRemoteThread(LoadLibraryW) seul ne permet pas de
-// lire GetLastError (le last-error est par thread, et le thread est detruit).
+// Stub distant : LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH) puis
+// GetLastError(). Le dossier de la DLL est ainsi cherche en premier pour ses
+// dependances, et on recupere le code d'erreur exact du thread distant.
 // ---------------------------------------------------------------------------
 
 constexpr size_t kStubPathOffset = 0x100;
@@ -171,8 +119,8 @@ void push_u64(std::vector<uint8_t>& code, uint64_t value) {
 
 std::vector<uint8_t> build_stub(uintptr_t base) {
     const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
-    const uintptr_t loadLibrary =
-        reinterpret_cast<uintptr_t>(GetProcAddress(kernel32, "LoadLibraryW"));
+    const uintptr_t loadLibraryEx =
+        reinterpret_cast<uintptr_t>(GetProcAddress(kernel32, "LoadLibraryExW"));
     const uintptr_t getLastError =
         reinterpret_cast<uintptr_t>(GetProcAddress(kernel32, "GetLastError"));
 
@@ -183,8 +131,11 @@ std::vector<uint8_t> build_stub(uintptr_t base) {
     push_u8(code, 0x48); push_u8(code, 0x83); push_u8(code, 0xEC); push_u8(code, 0x28);
 
     push_u8(code, 0x48); push_u8(code, 0xB9); push_u64(code, base + kStubPathOffset);
-    push_u8(code, 0x48); push_u8(code, 0xB8); push_u64(code, loadLibrary);
-    push_u8(code, 0xFF); push_u8(code, 0xD0); // call LoadLibraryW
+    push_u8(code, 0x31); push_u8(code, 0xD2);                                  // xor edx, edx
+    push_u8(code, 0x41); push_u8(code, 0xB8);
+    push_u8(code, 0x08); push_u8(code, 0x00); push_u8(code, 0x00); push_u8(code, 0x00); // r8d = 8
+    push_u8(code, 0x48); push_u8(code, 0xB8); push_u64(code, loadLibraryEx);
+    push_u8(code, 0xFF); push_u8(code, 0xD0); // call LoadLibraryExW
 
     push_u8(code, 0x48); push_u8(code, 0xB9); push_u64(code, base + kStubResultOffset);
     push_u8(code, 0x48); push_u8(code, 0x89); push_u8(code, 0x01); // [rcx] = rax
@@ -258,8 +209,8 @@ std::string describe_load_error(DWORD code, const std::wstring& where) {
 
     switch (code) {
         case 0:
-            return "LoadLibraryW a renvoye NULL sans code d'erreur : blocage EAC, reessaie "
-                   "dans le lobby en DirectX 11 (" + path + ")";
+            return "EAC n'a pas fini de charger le jeu (aucun code renvoye) : attendre la "
+                   "disparition de la splash EAC (" + path + ")";
         case ERROR_MOD_NOT_FOUND:
             return "dependance introuvable (code 126) : copie vcruntime140.dll, "
                    "vcruntime140_1.dll, msvcp140.dll et d3dcompiler_47.dll a cote de la DLL (" +
@@ -273,7 +224,7 @@ std::string describe_load_error(DWORD code, const std::wstring& where) {
         case ERROR_ACCESS_DENIED:
             return "acces refuse (code 5) : lance le launcher en administrateur (" + path + ")";
         default:
-            return "LoadLibraryW a echoue (code " + std::to_string(code) + ") (" + path + ")";
+            return "LoadLibraryExW a echoue (code " + std::to_string(code) + ") (" + path + ")";
     }
 }
 
@@ -381,8 +332,7 @@ std::vector<std::wstring> missing_imports(const std::wstring& dllPath, std::stri
 }
 
 // ---------------------------------------------------------------------------
-// Fenetre de jeu : classe UnrealWindow et taille de jeu. La fenetre du splash
-// EAC, plus petite et d'une autre classe, ne doit pas declencher l'injection.
+// Fenetre de jeu : classe UnrealWindow et taille de jeu.
 // ---------------------------------------------------------------------------
 
 struct WindowSearch {
@@ -502,6 +452,24 @@ bool is_process_alive(DWORD pid) {
     return wait == WAIT_TIMEOUT;
 }
 
+bool eac_splash_present() {
+    static const wchar_t* const kClasses[] = {L"EAC splash", L"EACsplash",
+                                              L"EasyAntiCheat splash"};
+    for (const wchar_t* name : kClasses) {
+        if (FindWindowW(name, nullptr)) {
+            return true;
+        }
+    }
+
+    static const wchar_t* const kTitles[] = {L"Easy Anti-Cheat", L"EasyAntiCheat"};
+    for (const wchar_t* title : kTitles) {
+        if (FindWindowW(nullptr, title)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool probe_local_load(const std::wstring& dllPath, std::string& error) {
     error.clear();
 
@@ -548,26 +516,9 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
         return false;
     }
 
-    // On copie la DLL DANS le dossier du jeu : ses dependances se resolvent alors
-    // comme pour le jeu lui-meme (le dossier de l'exe est cherche en premier).
-    const std::wstring directory = process_directory(pid);
-    std::wstring target = dllPath;
-
-    if (!directory.empty()) {
-        const std::wstring copy = directory + L"\\RetracOGFN_inj.dll";
-        if (CopyFileW(dllPath.c_str(), copy.c_str(), FALSE)) {
-            target = copy;
-        }
-    }
-
-    const size_t slash = target.find_last_of(L"\\/");
-    if (slash != std::wstring::npos) {
-        run_remote(process, "SetDllDirectoryW", target.substr(0, slash));
-    }
-
     StubResult stub;
     std::string stubError;
-    const bool ran = run_stub(process, target, stub, stubError);
+    const bool ran = run_stub(process, dllPath, stub, stubError);
     CloseHandle(process);
 
     if (!ran) {
@@ -575,14 +526,14 @@ bool inject_library(DWORD pid, const std::wstring& dllPath, std::string& error) 
         return false;
     }
     if (stub.exit == kCrashExitCode) {
-        error = "crash du thread distant (0xC0000005) : offsets ou DllMain a revoir";
+        error = "crash du thread distant (0xC0000005) : DllMain a revoir";
         return false;
     }
     if (stub.module) {
         return true;
     }
 
-    error = describe_load_error(stub.error, target);
+    error = describe_load_error(stub.error, dllPath);
     return false;
 }
 

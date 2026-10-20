@@ -15,7 +15,7 @@
 namespace {
 
 constexpr wchar_t kDllName[] = L"RetracOGFN.dll";
-constexpr int kInjectAttempts = 12;
+constexpr int kInjectAttempts = 15;
 constexpr DWORD kAttemptDelayMs = 5000;
 
 void enable_dpi_awareness() {
@@ -187,9 +187,18 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         log_line("ok", "92", "Fenetre de jeu detectee.");
     }
 
-    // Le splash EAC charge encore ses modules : 3 s de stabilisation avant la
-    // premiere tentative.
-    Sleep(3000);
+    // La splash EAC est une fenetre separee : tant qu'elle est la, EAC refuse le
+    // LoadLibrary (et le jeu peut crasher). On attend qu'elle parte (max 120 s).
+    if (injector::eac_splash_present()) {
+        log_line("info", "96", "Splash EAC en cours : attente de la fin du chargement...");
+        for (int second = 0; second < 120 && injector::eac_splash_present(); ++second) {
+            Sleep(1000);
+        }
+        log_line("ok", "92", "Splash EAC termine.");
+    }
+
+    // 2 s de stabilisation avant la premiere tentative.
+    Sleep(2000);
 
     bool injected = false;
     for (int attempt = 1; attempt <= kInjectAttempts && !injected; ++attempt) {
