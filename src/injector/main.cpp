@@ -161,12 +161,16 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
     }
 
+    // PID de la cible retenue : sert a ne regarder que les fenetres du jeu, sinon
+    // la console du launcher est prise pour la fenetre de jeu.
+    const DWORD gamePid = targets.empty() ? 0 : targets.front().pid;
+
     // Le process apparait au splash EAC, bien avant la fenetre de jeu.
     log_line("info", "96", "Attente de la fenetre de jeu (splash EAC en cours)...");
-    for (int second = 0; second < 180 && !injector::game_window_ready(); ++second) {
+    for (int second = 0; second < 180 && !injector::game_window_ready(gamePid); ++second) {
         Sleep(1000);
     }
-    if (!injector::game_window_ready()) {
+    if (!injector::game_window_ready(gamePid)) {
         log_line("avert", "93", "Fenetre de jeu absente : on injecte quand meme.");
     } else {
         log_line("ok", "92", "Fenetre de jeu detectee.");
