@@ -15,8 +15,9 @@
 namespace {
 
 constexpr wchar_t kDllName[] = L"RetracOGFN.dll";
-constexpr int kInjectAttempts = 15;
-constexpr DWORD kAttemptDelayMs = 5000;
+constexpr ULONGLONG kTotalBudgetMs = 180000;   // 3 min de patience au total
+constexpr ULONGLONG kReadyTimeoutMs = 45000;   // attente max du chargement
+constexpr DWORD kAttemptDelayMs = 8000;
 
 void enable_dpi_awareness() {
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
@@ -162,8 +163,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     log_line("info", "96", "Recherche de Fortnite...");
 
-    std::vector<injector::Target> targets = injector::find_fortnite_processes();
-    if (targets.empty()) {
+    std::vector<injector::Target> targets;
+    if (!injector::wait_for_fortnite(30000, targets)) {
         log_line("info", "93", "Fortnite n'est pas lance. En attente (120 s)...");
         if (!injector::wait_for_fortnite(120000, targets)) {
             log_line("erreur", "91", "Fortnite absent. Lance le jeu puis relance ce programme.");
@@ -172,38 +173,41 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
     }
 
-    // PID de la cible : sert a ne regarder que les fenetres du jeu, sinon la
-    // console du launcher est prise pour la fenetre de jeu.
-    const DWORD gamePid = targets.empty() ? 0 : targets.front().pid;
+    // EAC protege le process pendant tout le chargement : tant que la fenetre de
+    // jeu n'a pas le focus (c'est la splash EAC qui l'a), on n'y touche pas.
+    log_line("info", "96", "Attente de la fin du chargement EAC (le jeu doit passer au premier "
+                           "plan)...");
 
-    // Le process apparait au splash EAC, bien avant la fenetre de jeu.
-    log_line("info", "96", "Attente de la fenetre de jeu (splash EAC en cours)...");
-    for (int second = 0; second < 180 && !injector::game_window_ready(gamePid); ++second) {
-        Sleep(1000);
-    }
-    if (!injector::game_window_ready(gamePid)) {
-        log_line("avert", "93", "Fenetre de jeu absente : on injecte quand meme.");
-    } else {
-        log_line("ok", "92", "Fenetre de jeu detectee.");
-    }
-
-    // La splash EAC est une fenetre separee : tant qu'elle est la, EAC refuse le
-    // LoadLibrary (et le jeu peut crasher). On attend qu'elle parte (max 120 s).
-    if (injector::eac_splash_present()) {
-        log_line("info", "96", "Splash EAC en cours : attente de la fin du chargement...");
-        for (int second = 0; second < 120 && injector::eac_splash_present(); ++second) {
-            Sleep(1000);
-        }
-        log_line("ok", "92", "Splash EAC termine.");
-    }
-
-    // 2 s de stabilisation avant la premiere tentative.
-    Sleep(2000);
-
+    const ULONGLONG start = GetTickCount64();
+    DWORD lastPid = 0;
+    int foregroundSeconds = 0;
     bool injected = false;
-    for (int attempt = 1; attempt <= kInjectAttempts && !injected; ++attempt) {
-        if (targets.empty()) {
-            injector::wait_for_fortnite(15000, targets);
+
+    while (!injected && GetTickCount64() - start < kTotalBudgetMs) {
+        if (targets.empty() && !injector::wait_for_fortnite(10000, targets)) {
+            continue;
+        }
+
+        const DWORD pid = targets.front().pid;
+
+        // Le jeu a redemarre : on refait l'attente de chargement.
+        if (pid != lastPid) {
+            lastPid = pid;
+            foregroundSeconds = 0;
+            log_line("info", "96", "Cible : " + paths::to_narrow(targets.front().name) + " (PID " +
+                                       std::to_string(pid) + ")");
+        }
+
+        const bool loaded = foregroundSeconds >= 3;
+        if (!loaded && GetTickCount64() - start < kReadyTimeoutMs) {
+            if (injector::game_window_foreground(pid)) {
+                if (++foregroundSeconds == 3) {
+                    log_line("ok", "92", "Jeu charge : injection.");
+                    Sleep(2000);
+                }
+            }
+            Sleep(1000);
+            continue;
         }
 
         for (const injector::Target& target : targets) {
@@ -226,11 +230,7 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
         if (!injected) {
             targets.clear();
-            if (attempt < kInjectAttempts) {
-                log_line("info", "93", "Nouvelle tentative dans 5 s (" + std::to_string(attempt) +
-                                           "/" + std::to_string(kInjectAttempts) + ")...");
-                Sleep(kAttemptDelayMs);
-            }
+            Sleep(kAttemptDelayMs);
         }
     }
 
