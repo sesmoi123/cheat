@@ -15,6 +15,8 @@
 namespace {
 
 constexpr wchar_t kDllName[] = L"RetracOGFN.dll";
+constexpr int kInjectAttempts = 12;
+constexpr DWORD kAttemptDelayMs = 5000;
 
 void enable_dpi_awareness() {
     if (HMODULE user32 = GetModuleHandleW(L"user32.dll")) {
@@ -149,6 +151,15 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
     log_line("ok", "92", "Cheat pret (" + std::to_string(resources::embedded_dll_size() / 1024) +
                              " Ko embarques)");
+
+    // Test local : valide le binaire (x64, imports, DllMain) sans EAC ni jeu.
+    std::string probeError;
+    if (injector::probe_local_load(dllPath, probeError)) {
+        log_line("ok", "92", "Test local de la DLL : OK");
+    } else {
+        log_line("avert", "93", "Test local de la DLL : " + probeError);
+    }
+
     log_line("info", "96", "Recherche de Fortnite...");
 
     std::vector<injector::Target> targets = injector::find_fortnite_processes();
@@ -161,8 +172,8 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         }
     }
 
-    // PID de la cible retenue : sert a ne regarder que les fenetres du jeu, sinon
-    // la console du launcher est prise pour la fenetre de jeu.
+    // PID de la cible : sert a ne regarder que les fenetres du jeu, sinon la
+    // console du launcher est prise pour la fenetre de jeu.
     const DWORD gamePid = targets.empty() ? 0 : targets.front().pid;
 
     // Le process apparait au splash EAC, bien avant la fenetre de jeu.
@@ -176,8 +187,12 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
         log_line("ok", "92", "Fenetre de jeu detectee.");
     }
 
+    // Le splash EAC charge encore ses modules : 3 s de stabilisation avant la
+    // premiere tentative.
+    Sleep(3000);
+
     bool injected = false;
-    for (int attempt = 1; attempt <= 5 && !injected; ++attempt) {
+    for (int attempt = 1; attempt <= kInjectAttempts && !injected; ++attempt) {
         if (targets.empty()) {
             injector::wait_for_fortnite(15000, targets);
         }
@@ -202,10 +217,10 @@ int WINAPI wWinMain(HINSTANCE, HINSTANCE, LPWSTR, int) {
 
         if (!injected) {
             targets.clear();
-            if (attempt < 5) {
-                log_line("info", "93",
-                         "Nouvelle tentative dans 4 s (" + std::to_string(attempt) + "/5)...");
-                Sleep(4000);
+            if (attempt < kInjectAttempts) {
+                log_line("info", "93", "Nouvelle tentative dans 5 s (" + std::to_string(attempt) +
+                                           "/" + std::to_string(kInjectAttempts) + ")...");
+                Sleep(kAttemptDelayMs);
             }
         }
     }
